@@ -124,7 +124,13 @@ class BaseWS(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        return proto.loads(await asyncio.wait_for(websocket.recv(), timeout=5))
+        self.ready_frame = proto.loads(await asyncio.wait_for(websocket.recv(), timeout=5))
+        return self.ready_frame
+
+    async def hello_and_store(self, websocket, **kwargs):
+        """Как ``hello``, но запоминает кадр ready (для проверок возможностей)."""
+        self.ready_frame = await self.hello(websocket, **kwargs)
+        return self.ready_frame
 
     async def recv_frame(self, websocket, kind=None, timeout=5.0):
         """Читает кадры до нужного типа (аватар/typing приходят вперемешку с сообщениями)."""

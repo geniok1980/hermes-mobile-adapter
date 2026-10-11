@@ -103,8 +103,50 @@ def _env_or_extra(extra: Dict[str, Any], env_key: str, extra_key: str, default: 
     return default if value in (None, "") else value
 
 
+def _default_suffix(kind: str, mime: str) -> str:
+    """Расширение для сохранённого входящего файла, если приложение его не назвало."""
+    by_mime = {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+        "image/heic": ".heic", "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+        "audio/wav": ".wav", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+        "application/pdf": ".pdf", "text/plain": ".txt",
+    }
+    if mime in by_mime:
+        return by_mime[mime]
+    return {"image": ".jpg", "video": ".mp4", "audio": ".ogg", "document": ".bin"}.get(kind, ".bin")
+
+
+def parse_target_ref(target_ref: str) -> Optional[tuple]:
+    """Разбирает адрес доставки для ``hermes send --to mobile:<устройство>`` и cron.
+
+    Принимает ``mobile:dev-1`` и просто ``dev-1`` (тогда подставляем префикс платформы).
+    Возвращает ``(chat_id, thread_id)``; ``None`` — не наш адрес, пусть решает шлюз.
+    """
+    raw = str(target_ref or "").strip()
+    if not raw:
+        return None
+    if raw.lower() in ("home", "mobile", PLATFORM_NAME, f"{PLATFORM_NAME}:home"):
+        return None  # домашний канал/устройство резолвит сам шлюз
+    if raw.startswith(f"{PLATFORM_NAME}:"):
+        device = raw.split(":", 1)[1].strip()
+        return (f"{PLATFORM_NAME}:{device}", None) if device else None
+    return (f"{PLATFORM_NAME}:{raw}", None)
+
+
+def validate_target_ref(target_ref: str) -> bool | str:
+    """Проверка адреса доставки: непустое имя устройства (диагностику показывает шлюз)."""
+    raw = str(target_ref or "").strip()
+    if not raw:
+        return "Пустой адрес: укажите устройство, например mobile:tel-1"
+    return True
+
+
 class HermesMobileAdapter(BasePlatformAdapter):
     """WebSocket-адаптер мобильного приложения (платформа hermes-mobile)."""
+
+    # Сколько символов шлём одним кадром message. База читает этот атрибут для нарезки
+    # и для стриминга (gateway/platforms/base.py: MAX_MESSAGE_LENGTH, по умолчанию 4096).
+    MAX_MESSAGE_LENGTH = proto.DEFAULT_CHUNK_LIMIT
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
@@ -148,6 +190,13 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self._media_dir = Path(
             os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
         ).expanduser() / "mobile-media"
+        # Карточки-вопросы (одобрение команды, clarify, подтверждение слэш-команды):
+        # prompt_id → {kind, session_key, chat_id, token, choices, created_at}.
+        self._pending_prompts: Dict[str, Dict[str, Any]] = {}
+        self._prompt_tasks: Dict[str, asyncio.Task] = {}
+        self.prompt_ttl = float(extra.get("prompt_ttl", proto.DEFAULT_PROMPT_TTL) or proto.DEFAULT_PROMPT_TTL)
+        # Сборка больших входящих файлов: "<chat_id>:<message_id>" → части.
+        self._media_buffers: Dict[str, Dict[str, Any]] = {}
 
     # ── служебное ────────────────────────────────────────────────────────────
 
@@ -214,6 +263,11 @@ class HermesMobileAdapter(BasePlatformAdapter):
         for task in list(self._idle_tasks.values()):
             await cancel_task(task)
         self._idle_tasks.clear()
+        for task in list(self._prompt_tasks.values()):
+            await cancel_task(task)
+        self._prompt_tasks.clear()
+        self._pending_prompts.clear()
+        self._media_buffers.clear()
         self._sessions.clear()
         self._mark_disconnected()
 
@@ -253,7 +307,18 @@ class HermesMobileAdapter(BasePlatformAdapter):
                     "session": device.chat_id,
                     "device": {"id": device.device_id, "name": device.display_name()},
                     "avatar_url": self.avatar_url,
-                    "capabilities": {"text": True, "voice": True, "typing": True, "avatar_states": list(proto.AVATAR_STATES)},
+                    "capabilities": {
+                        "text": True,
+                        "voice": True,
+                        "typing": True,
+                        "avatar_states": list(proto.AVATAR_STATES),
+                        "media_in": list(proto.INBOUND_MEDIA_KINDS),
+                        "media_out": list(proto.OUTBOUND_MEDIA_KINDS),
+                        "prompts": list(proto.PROMPT_KINDS),
+                        "edit": True,               # приложение умеет править сообщение по id (стриминг)
+                        "max_media_bytes": proto.MAX_MEDIA_BYTES,
+                        "max_text_chars": proto.MAX_TEXT_CHARS,
+                    },
                 },
             )
             logger.info("hermes-mobile: подключилось устройство %s (%s)", device.device_id, device.display_name())
@@ -295,6 +360,10 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 await websocket.send(proto.dumps({"t": proto.S_PONG, "ts": frame.get("ts")}))
             elif kind == proto.C_DELIVER:
                 await self._on_deliver(device, frame)
+            elif kind == proto.C_MEDIA:
+                await self._on_media(device, frame)
+            elif kind == proto.C_PROMPT:
+                await self._on_prompt_response(device, frame)
             elif kind == proto.C_ACK:
                 return
             elif kind == proto.C_HELLO:
@@ -342,16 +411,111 @@ class HermesMobileAdapter(BasePlatformAdapter):
         event.metadata["mobile"]["voice"] = True
         await self.handle_message(event)
 
+    async def _on_media(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
+        """Медиа от приложения: фото, видео, файл, аудио.
+
+        Большие файлы приходят несколькими кадрами (``part``/``parts``) — собираем их
+        до последнего куска и только потом отдаём агенту, иначе он получит обрывок.
+        """
+        info = proto.parse_media_upload(frame)
+        message_id = info["message_id"]
+        key = f"{device.chat_id}:{message_id}"
+        if info["parts"] > 1:
+            # Многочастный файл: собираем куски и дедуп проверяем только на целом файле —
+            # иначе вторая часть была бы отброшена как «повтор» первой.
+            buffer = self._media_buffers.setdefault(
+                key,
+                {"parts": info["parts"], "chunks": {}, "kind": info["kind"], "mime": info["mime"],
+                 "filename": info["filename"], "caption": info["caption"]},
+            )
+            buffer["chunks"][info["part"]] = info["data"]
+            if len(buffer["chunks"]) < info["parts"]:
+                logger.debug(
+                    "hermes-mobile: медиа %s — часть %d/%d", message_id, info["part"] + 1, info["parts"]
+                )
+                return
+            part_map = buffer["chunks"]
+            info = {**info, **{field: buffer[field] for field in ("kind", "mime", "filename", "caption")}}
+        else:
+            part_map = {0: info["data"]}
+        if self._dedup.is_duplicate(key):
+            self._media_buffers.pop(key, None)
+            logger.info("hermes-mobile: дубликат медиа %s — пропускаю", message_id)
+            return
+        payload = b"".join(part_map[index] for index in sorted(part_map))
+        self._media_buffers.pop(key, None)
+        await self._finish_media(device, info, payload, message_id)
+
+    async def _finish_media(
+        self, device: MobileDevice, info: Dict[str, Any], payload: bytes, message_id: str
+    ) -> None:
+        """Сохраняет файл на диск и передаёт агенту как медиа-событие."""
+        if len(payload) > proto.MAX_MEDIA_BYTES:
+            raise proto.ProtocolError(
+                proto.E_TOO_BIG,
+                f"Файл больше {proto.MAX_MEDIA_BYTES // (1024 * 1024)} МБ — сократите или сожмите его",
+            )
+        suffix = Path(info["filename"] or "").suffix or _default_suffix(info["kind"], info["mime"])
+        path = self._store_bytes(message_id, payload, suffix)
+        kind = info["kind"]
+        message_type = {
+            "image": MessageType.PHOTO,
+            "video": MessageType.VIDEO,
+            "document": MessageType.DOCUMENT,
+            "audio": MessageType.VOICE,
+        }.get(kind, MessageType.DOCUMENT)
+        await self._set_avatar(device, "thinking")
+        event = self._build_event(
+            device,
+            text=info["caption"] or "",
+            message_id=message_id,
+            message_type=message_type,
+            media_urls=[str(path)],
+            media_types=[info["mime"]],
+            media_text_inlined=[False],   # текст в файле не подставляем в сообщение
+        )
+        event.metadata["mobile"].update({"media_kind": kind, "filename": info["filename"]})
+        await self.handle_message(event)
+
     async def _on_deliver(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
         """Служебная доставка от другого процесса (cron) — отдаём целевому устройству."""
         target = str(frame.get("target") or "").strip() or self.home_device
-        text = proto.require_text(frame)
+        text = str(frame.get("text") or "")
+        media = frame.get("media")
+        if not text.strip() and not (isinstance(media, dict) and media.get("data")):
+            raise proto.ProtocolError(proto.E_BAD_FRAME, "В кадре deliver нет ни text, ни media")
         session = await self._session_for(target)
         if session is None:
             raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, f"Устройство {target or '<по умолчанию>'} не подключено")
+        if isinstance(media, dict) and media.get("data"):
+            await self._deliver_media(session, media, text)
+            return
         result = await self.send(session.chat_id, text)
         if not result.success:
             raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, result.error or "не доставлено")
+
+    async def _deliver_media(self, session: MobileDevice, media: Dict[str, Any], caption: str) -> None:
+        """Вложение из служебной доставки: сохраняем во временный файл и отдаём как медиа."""
+        try:
+            payload = base64.b64decode(str(media.get("data") or ""), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise proto.ProtocolError(proto.E_BAD_FRAME, "Поле media.data не является корректным base64") from exc
+        if not payload:
+            raise proto.ProtocolError(proto.E_BAD_FRAME, "Пустое вложение")
+        if len(payload) > proto.MAX_MEDIA_BYTES:
+            raise proto.ProtocolError(
+                proto.E_TOO_BIG, f"Вложение больше {proto.MAX_MEDIA_BYTES // (1024 * 1024)} МБ"
+            )
+        kind = str(media.get("kind") or "document")
+        filename = str(media.get("filename") or "") or None
+        suffix = Path(filename or "").suffix or _default_suffix(kind, str(media.get("mime") or ""))
+        path = self._store_bytes(uuid.uuid4().hex, payload, suffix)
+        out_kind = kind if kind in ("image", "voice", "video") else "document"
+        result = await self._send_media_file(
+            session.chat_id, str(path), out_kind, caption or None, filename=filename
+        )
+        if not result.success:
+            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, result.error or "вложение не доставлено")
 
     def _build_event(
         self,
@@ -362,6 +526,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
         message_type: MessageType,
         media_urls: Optional[List[str]] = None,
         media_types: Optional[List[str]] = None,
+        media_text_inlined: Optional[List[Optional[bool]]] = None,
     ) -> MessageEvent:
         user_id = device.user_id or device.device_id
         user_name = device.display_name()
@@ -382,6 +547,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             message_id=message_id,
             media_urls=list(media_urls or []),
             media_types=list(media_types or []),
+            media_text_inlined=list(media_text_inlined or []),
             metadata={
                 "mobile": {
                     "device_id": device.device_id,
@@ -394,11 +560,396 @@ class HermesMobileAdapter(BasePlatformAdapter):
 
     def _store_audio(self, message_id: str, audio: bytes, fmt: str) -> Path:
         """Сохраняет голосовое во временный файл: Hermes читает медиа с диска."""
+        return self._store_bytes(message_id, audio, f".{fmt}")
+
+    def _store_bytes(self, message_id: str, payload: bytes, suffix: str) -> Path:
+        """Сохраняет входящий файл в каталог медиа профиля и возвращает путь."""
         self._media_dir.mkdir(parents=True, exist_ok=True)
         safe = "".join(ch for ch in message_id if ch.isalnum() or ch in "-_") or uuid.uuid4().hex
-        path = self._media_dir / f"{safe}.{fmt}"
-        path.write_bytes(audio)
+        clean_suffix = suffix if suffix.startswith(".") and len(suffix) <= 12 else ""
+        path = self._media_dir / f"{safe}{clean_suffix}"
+        path.write_bytes(payload)
         return path
+
+    # ── медиа наружу (агент → приложение) ────────────────────────────────────
+
+    async def _send_media_file(
+        self,
+        chat_id: str,
+        path: str,
+        kind: str,
+        caption: Optional[str] = None,
+        filename: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> SendResult:
+        """Отправляет файл приложению кадром ``media`` (большие — несколькими частями).
+
+        Локальный файл читается с диска; если файла нет, но есть ``url`` — шлём ссылку,
+        приложение скачает само. Никаких «тихих» успехов: если не отправили — success=False,
+        и шлюз сам сообщит агенту, что доставка не удалась.
+        """
+        session = await self._session_for(chat_id)
+        if session is None:
+            return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+        message_id = uuid.uuid4().hex
+        name = filename or (Path(path).name if path else None)
+        mime = proto.guess_mime(name, "application/octet-stream")
+        if kind == "voice" and mime == "application/octet-stream":
+            mime = "audio/ogg"
+
+        payload = b""
+        if path and Path(path).is_file():
+            try:
+                payload = Path(path).read_bytes()
+            except OSError as exc:
+                logger.warning("hermes-mobile: не прочитал файл %s — %s", path, exc)
+        if not payload and not url:
+            return SendResult(success=False, error=f"Файл недоступен: {path}", retryable=False)
+        if payload and len(payload) > proto.MAX_MEDIA_BYTES:
+            return SendResult(
+                success=False,
+                error=(
+                    f"Файл {len(payload) / 1048576:.1f} МБ больше лимита "
+                    f"{proto.MAX_MEDIA_BYTES // 1048576} МБ для мобильного канала"
+                ),
+                retryable=False,
+            )
+
+        chunks = proto.split_bytes(payload) if payload else [b""]
+        total = len(chunks)
+        await self._set_avatar(session, "speaking")
+        for index, chunk in enumerate(chunks):
+            frame: Dict[str, Any] = {
+                "t": proto.S_MEDIA,
+                "id": message_id,
+                "kind": kind,
+                "mime": mime,
+                "filename": name,
+                "caption": caption or "",
+                "part": index,
+                "parts": total,
+                "final": index == total - 1,
+                "size": len(payload),
+            }
+            if chunk:
+                frame["data"] = base64.b64encode(chunk).decode()
+            if url and index == 0:
+                frame["url"] = url
+            if reply_to:
+                frame["reply_to"] = reply_to
+            if not await self._push(session, frame):
+                return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+        self._schedule_idle(session)
+        return SendResult(success=True, message_id=message_id)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Картинка из локального файла (агент сгенерировал график/скриншот)."""
+        return await self._send_media_file(chat_id, image_path, "image", caption, reply_to=reply_to)
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Картинка по ссылке либо из локального файла (``file://`` или путь)."""
+        target = str(image_url or "")
+        local = target[7:] if target.startswith("file://") else target
+        if local and not target.startswith(("http://", "https://")) and Path(local).is_file():
+            return await self._send_media_file(chat_id, local, "image", caption, reply_to=reply_to)
+        return await self._send_media_file(chat_id, "", "image", caption, reply_to=reply_to, url=target)
+
+    async def send_animation(
+        self,
+        chat_id: str,
+        animation_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """GIF/анимация — приложение покажет её как картинку или видео."""
+        return await self.send_image(chat_id, animation_url, caption, reply_to, metadata)
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Голосовое сообщение от агента (озвучка ответа аватаром)."""
+        return await self._send_media_file(chat_id, audio_path, "voice", caption, reply_to=reply_to)
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Видео — приложение проигрывает его инлайн."""
+        return await self._send_media_file(chat_id, video_path, "video", caption, reply_to=reply_to)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Файл (PDF, xlsx, zip…) — приложение сохраняет или открывает его."""
+        return await self._send_media_file(
+            chat_id, file_path, "document", caption, filename=file_name, reply_to=reply_to
+        )
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        images: List[Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> SendResult:
+        """Несколько картинок подряд. Успех — если доставлена хотя бы одна (как в контракте базы)."""
+        delivered, last_id, first_error = 0, None, None
+        for item in images:
+            url = item[0] if isinstance(item, (tuple, list)) and item else str(item)
+            caption = item[1] if isinstance(item, (tuple, list)) and len(item) > 1 else None
+            result = await self.send_image(chat_id, url, caption)
+            if result.success:
+                delivered += 1
+                last_id = result.message_id
+            elif first_error is None:
+                first_error = result.error
+            if human_delay:
+                await asyncio.sleep(human_delay)
+        if delivered:
+            return SendResult(success=True, message_id=last_id)
+        return SendResult(success=False, error=first_error or "Ни одна картинка не доставлена")
+
+    # ── карточки-вопросы (одобрение команды, clarify, подтверждение) ─────────
+
+    async def _send_prompt(
+        self,
+        *,
+        chat_id: str,
+        kind: str,
+        text: str,
+        options: List[Dict[str, Any]],
+        session_key: str = "",
+        token: str = "",
+        choices: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Шлёт приложению карточку с вариантами и запоминает её до ответа или истечения.
+
+        Если карточку не удалось отправить, состояние не оставляем: иначе следующий,
+        никак не связанный ответ пользователя был бы принят за ответ на невидимую карточку.
+        """
+        session = await self._session_for(chat_id)
+        if session is None:
+            return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+        prompt_id = uuid.uuid4().hex
+        self._pending_prompts[prompt_id] = {
+            "kind": kind,
+            "session_key": session_key,
+            "token": token,
+            "chat_id": session.chat_id,
+            "choices": list(choices or []),
+            "created_at": time.time(),
+        }
+        ok = await self._push(
+            session,
+            {
+                "t": proto.S_PROMPT,
+                "id": prompt_id,
+                "kind": kind,
+                "text": text,
+                "options": options,
+                "session": session.chat_id,
+                "timeout_seconds": int(self.prompt_ttl),
+            },
+        )
+        if not ok:
+            self._pending_prompts.pop(prompt_id, None)
+            return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+        self._schedule_prompt_expiry(prompt_id)
+        logger.info("hermes-mobile: карточка %s (%s) отправлена устройству %s", prompt_id, kind, session.device_id)
+        return SendResult(success=True, message_id=prompt_id)
+
+    async def _send_exec_approval_prompt(self, prompt) -> SendResult:
+        """Кнопки одобрения опасной команды: once / session / always / deny.
+
+        База собирает ``ExecApprovalPrompt`` с готовыми вариантами (учитывая
+        ``allow_permanent``/``allow_session``/``smart_denied``) — берём их как есть.
+        """
+        options = [
+            {"id": choice, "label": label, "style": style or ""}
+            for label, choice, style in (getattr(prompt, "actions", None) or [])
+        ]
+        return await self._send_prompt(
+            chat_id=prompt.chat_id,
+            kind=proto.P_EXEC_APPROVAL,
+            text=prompt.text,
+            options=options,
+            session_key=prompt.session_key,
+            metadata=getattr(prompt, "metadata", None),
+        )
+
+    async def send_slash_confirm(
+        self,
+        chat_id: str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Подтверждение слэш-команды: Approve Once / Always Approve / Cancel."""
+        text = f"{title}\n\n{message}" if title and message else (message or title)
+        return await self._send_prompt(
+            chat_id=chat_id,
+            kind=proto.P_SLASH_CONFIRM,
+            text=text,
+            options=[
+                {"id": "once", "label": "✅ Одобрить один раз", "style": "primary"},
+                {"id": "always", "label": "🔒 Всегда одобрять", "style": ""},
+                {"id": "cancel", "label": "❌ Отмена", "style": "danger"},
+            ],
+            session_key=session_key,
+            token=confirm_id,
+            metadata=metadata,
+        )
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Уточняющий вопрос: кнопки по вариантам + «свой ответ» (текстом)."""
+        options = [
+            {"id": f"c{index}", "label": str(choice), "style": ""}
+            for index, choice in enumerate(choices or [])
+        ]
+        if options:
+            options.append({"id": proto.CLARIFY_OTHER, "label": "✏️ Свой ответ", "style": ""})
+        return await self._send_prompt(
+            chat_id=chat_id,
+            kind=proto.P_CLARIFY,
+            text=question,
+            options=options,
+            session_key=session_key,
+            token=clarify_id,
+            choices=[str(choice) for choice in (choices or [])],
+            metadata=metadata,
+        )
+
+    async def _on_prompt_response(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
+        """Ответ на карточку: резолвим через штатные резолверы Hermes, не как сообщение в чат."""
+        info = proto.parse_prompt_response(frame)
+        pending = self._pending_prompts.pop(info["prompt_id"], None)
+        if pending is None:
+            logger.info("hermes-mobile: ответ на неизвестную/истёкшую карточку %s — игнорирую", info["prompt_id"])
+            await self._push(device, {"t": proto.S_PROMPT_DONE, "id": info["prompt_id"], "expired": True})
+            return
+        task = self._prompt_tasks.pop(info["prompt_id"], None)
+        if task is not None:
+            task.cancel()
+        kind = pending["kind"]
+        option_id, text = info["option_id"], info["text"].strip()
+        resolved_option = await self._resolve_prompt(kind, pending, option_id, text)
+        await self._push(
+            device,
+            {"t": proto.S_PROMPT_DONE, "id": info["prompt_id"], "option_id": resolved_option},
+        )
+
+    async def _resolve_prompt(
+        self, kind: str, pending: Dict[str, Any], option_id: str, text: str
+    ) -> Optional[str]:
+        """Вызывает резолвер Hermes и возвращает фактически применённый вариант."""
+        # Ключевое правило: ответ всегда валидируем сами — незнакомое значение
+        # превращаем в безопасное (deny / cancel), как это делают штатные адаптеры.
+        if kind == proto.P_EXEC_APPROVAL:
+            choice = option_id if proto.option_allowed(kind, option_id) else "deny"
+            from tools.approval import resolve_gateway_approval
+            from asyncio import to_thread as _to_thread  # резолвер синхронный
+            count = await _to_thread(resolve_gateway_approval, pending["session_key"], choice)
+            logger.info(
+                "hermes-mobile: одобрение команды → %s (ожидающих: %s)", choice, count
+            )
+            return choice
+        if kind == proto.P_SLASH_CONFIRM:
+            choice = option_id if proto.option_allowed(kind, option_id) else "cancel"
+            from tools import slash_confirm as slash_confirm_mod
+            result_text = await slash_confirm_mod.resolve(pending["session_key"], pending["token"], choice)
+            if result_text:
+                session = await self._session_for(pending["chat_id"])
+                if session is not None:
+                    await self.send(session.chat_id, str(result_text))
+            return choice
+        if kind == proto.P_CLARIFY:
+            from tools.clarify_gateway import mark_awaiting_text, resolve_gateway_clarify
+            choices = pending.get("choices") or []
+            if text and (not option_id or option_id == proto.CLARIFY_OTHER):
+                resolve_gateway_clarify(pending["token"], text)
+                return proto.CLARIFY_OTHER
+            if option_id == proto.CLARIFY_OTHER or not proto.option_allowed(kind, option_id):
+                mark_awaiting_text(pending["token"])
+                return proto.CLARIFY_OTHER
+            index = int(option_id[1:])
+            if index >= len(choices):
+                mark_awaiting_text(pending["token"])
+                return proto.CLARIFY_OTHER
+            resolve_gateway_clarify(pending["token"], choices[index])
+            return option_id
+        logger.warning("hermes-mobile: неизвестный тип карточки %r", kind)
+        return None
+
+    def _schedule_prompt_expiry(self, prompt_id: str) -> None:
+        """Через ``prompt_ttl`` закрывает карточку: приложение получает prompt_done(expired)."""
+        previous = self._prompt_tasks.pop(prompt_id, None)
+        if previous is not None:
+            previous.cancel()
+
+        async def _expire() -> None:
+            try:
+                await asyncio.sleep(self.prompt_ttl)
+                pending = self._pending_prompts.pop(prompt_id, None)
+                if pending is None:
+                    return
+                session = await self._session_for(pending["chat_id"])
+                if session is not None:
+                    await self._push(session, {"t": proto.S_PROMPT_DONE, "id": prompt_id, "expired": True})
+                logger.info("hermes-mobile: карточка %s истекла", prompt_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("hermes-mobile: не удалось закрыть карточку %s", prompt_id, exc_info=True)
+            finally:
+                self._prompt_tasks.pop(prompt_id, None)
+
+        self._prompt_tasks[prompt_id] = asyncio.create_task(_expire())
 
     # ── исходящие сообщения ──────────────────────────────────────────────────
 
@@ -444,6 +995,42 @@ class HermesMobileAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         session = await self._session_for(chat_id)
         return {"name": session.display_name() if session else chat_id, "type": "dm"}
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Гасит индикатор: шлюз запускает цикл «печатает» каждые ~2 секунды и зовёт это в конце."""
+        session = await self._session_for(chat_id)
+        if session is None:
+            return
+        await self._push(session, {"t": proto.S_TYPING, "stop": True})
+        await self._set_avatar(session, "idle")
+
+    async def edit_message(
+        self, chat_id: str, message_id: str, content: str, *, finalize: bool = False
+    ) -> SendResult:
+        """Правка уже отправленного сообщения — это включает потоковую выдачу ответа.
+
+        Шлюз при включённом ``gateway.streaming.enabled`` сначала шлёт сообщение целиком,
+        затем правит его по мере генерации и в конце вызывает с ``finalize=True``.
+        Приложение перерисовывает сообщение с тем же ``id``. Если вернуть success=False,
+        шлюз не потеряет текст — дошлёт хвост обычным сообщением.
+        """
+        session = await self._session_for(chat_id)
+        if session is None:
+            return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+        ok = await self._push(
+            session,
+            {
+                "t": proto.S_MESSAGE,
+                "id": message_id,
+                "text": content,
+                "edit": True,
+                "chunk": {"index": 0, "total": 1},
+                "final": bool(finalize),
+            },
+        )
+        if not ok:
+            return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+        return SendResult(success=True, message_id=message_id)
 
     # ── вспомогательное для соединений ───────────────────────────────────────
 
@@ -670,6 +1257,31 @@ async def standalone_send(
                         }
                     )
                 )
+            for path in list(media_files or []):
+                file_path = Path(str(path))
+                if not file_path.is_file():
+                    logger.warning("hermes-mobile: вложение %s недоступно — пропускаю", path)
+                    continue
+                payload = file_path.read_bytes()
+                if len(payload) > proto.MAX_MEDIA_BYTES:
+                    return {"error": f"вложение {file_path.name} больше {proto.MAX_MEDIA_BYTES // (1024 * 1024)} МБ"}
+                kind = "image" if proto.guess_mime(file_path.name).startswith("image/") else "document"
+                await websocket.send(
+                    proto.dumps(
+                        {
+                            "t": proto.C_DELIVER,
+                            "id": f"{message_id}:media:{file_path.name}",
+                            "target": chat_id,
+                            "text": "" if force_document or kind == "document" else message,
+                            "media": {
+                                "kind": "document" if force_document else kind,
+                                "mime": proto.guess_mime(file_path.name),
+                                "filename": file_path.name,
+                                "data": base64.b64encode(payload).decode(),
+                            },
+                        }
+                    )
+                )
             return {"success": True, "message_id": message_id}
     except Exception as exc:
         return {"error": f"шлюз недоступен ({exc.__class__.__name__}: {exc})"}
@@ -710,6 +1322,10 @@ def register(ctx) -> None:
         setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
         allowed_users_env="MOBILE_ALLOWED_USERS",
+        allow_all_env="MOBILE_ALLOW_ALL_USERS",
+        is_connected=validate_config,
+        parse_target_ref_fn=parse_target_ref,
+        validate_target_ref_fn=validate_target_ref,
         max_message_length=proto.DEFAULT_CHUNK_LIMIT,
         emoji="📱",
         pii_safe=True,

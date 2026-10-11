@@ -45,17 +45,41 @@ C_TYPING = "typing"      # {t} — «пользователь печатает»
 C_PING = "ping"          # {t, ts?}
 C_ACK = "ack"            # {t, id} — приложение подтвердило показ/проигрывание
 C_DELIVER = "deliver"    # {t, id, target, text} — служебная доставка (cron → устройство)
+C_PROMPT = "prompt"      # {t, prompt_id, option_id, text?} — ответ на карточку-вопрос
+C_MEDIA = "media"        # {t, id, kind, mime, filename?, caption?, data, part?, parts?} — медиа от приложения
 
 # ── Типы кадров: сервер → клиент ─────────────────────────────────────────────
 S_READY = "ready"        # {t, v, session, device, avatar_url, capabilities}
-S_TYPING = "typing"      # {t}
-S_MESSAGE = "message"    # {t, id, text, chunk:{index,total}, final}
+S_TYPING = "typing"      # {t, stop?} — «агент печатает» / остановить индикатор
+S_MESSAGE = "message"    # {t, id, text, chunk:{index,total}, final, edit?}
 S_AVATAR = "avatar"      # {t, state:"idle"|"thinking"|"speaking", mood?}
 S_ERROR = "error"        # {t, code, message, fatal}
 S_PONG = "pong"          # {t, ts}
 S_DELIVERED = "delivered"  # {t, id, device} — ответ на служебную доставку (standalone)
+S_PROMPT = "prompt"      # {t, id, kind, text, options:[{id,label,style?}], session, timeout_seconds}
+S_PROMPT_DONE = "prompt_done"  # {t, id, option_id?, expired?} — карточка закрыта
+S_MEDIA = "media"        # {t, id, kind, mime, filename, caption?, data, part, parts, final, size}
 
 AVATAR_STATES = ("idle", "thinking", "speaking")
+
+# Типы карточек-вопросов (kind в кадре prompt).
+P_EXEC_APPROVAL = "exec_approval"
+P_SLASH_CONFIRM = "slash_confirm"
+P_CLARIFY = "clarify"
+PROMPT_KINDS = (P_EXEC_APPROVAL, P_SLASH_CONFIRM, P_CLARIFY)
+
+# Допустимые ответы. Всё, что не в списке, адаптер заменяет на безопасное значение:
+# для одобрения опасной команды — deny, для подтверждения слэш-команды — cancel.
+EXEC_APPROVAL_OPTIONS = ("once", "session", "always", "deny")
+SLASH_CONFIRM_OPTIONS = ("once", "always", "cancel")
+CLARIFY_OTHER = "other"
+
+# Медиа: что приложение может прислать агенту и что адаптер может прислать приложению.
+INBOUND_MEDIA_KINDS = ("image", "video", "document", "audio")
+OUTBOUND_MEDIA_KINDS = ("image", "voice", "video", "document", "animation")
+MAX_MEDIA_BYTES = 8 * 1024 * 1024     # один файл (base64 ≈ 10.7 МБ — влезает в кадр)
+MEDIA_CHUNK_BYTES = 3 * 1024 * 1024   # размер куска при передаче больших файлов
+DEFAULT_PROMPT_TTL = 300.0            # столько же, сколько ждёт текстовый фолбэк Hermes
 
 # Коды ошибок протокола (стабильные — клиент показывает их пользователю).
 E_AUTH_REQUIRED = "auth_required"
@@ -272,3 +296,120 @@ def trim_for_log(text: Optional[str], limit: int = 120) -> str:
     """Короткая однострочная выжимка текста для логов."""
     flat = " ".join(str(text or "").split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+# ── Медиа ────────────────────────────────────────────────────────────────────
+
+def guess_mime(filename: Optional[str], fallback: str = "application/octet-stream") -> str:
+    """MIME по расширению файла (для кадра media); неизвестное — fallback."""
+    name = str(filename or "").lower()
+    table = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+        ".gif": "image/gif", ".heic": "image/heic",
+        ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+        ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".ogg": "audio/ogg", ".oga": "audio/ogg",
+        ".wav": "audio/wav", ".opus": "audio/opus", ".aac": "audio/aac",
+        ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown",
+        ".csv": "text/csv", ".json": "application/json", ".zip": "application/zip",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    for ext, mime in table.items():
+        if name.endswith(ext):
+            return mime
+    return fallback
+
+
+def split_bytes(payload: bytes, chunk_size: int = MEDIA_CHUNK_BYTES) -> List[bytes]:
+    """Режет файл на куски для передачи кадрами (большие файлы не влезают в один кадр)."""
+    size = max(1, int(chunk_size))
+    return [payload[i: i + size] for i in range(0, len(payload), size)] or [b""]
+
+
+def parse_media_upload(frame: Dict[str, Any]) -> Dict[str, Any]:
+    """Разбирает кадр ``media`` от приложения.
+
+    Возвращает ``{kind, mime, filename, caption, data, part, parts, message_id}``;
+    ``data`` — уже декодированные байты куска. Ошибки — ``ProtocolError``.
+    """
+    kind = str(frame.get("kind") or "").strip().lower()
+    if kind not in INBOUND_MEDIA_KINDS:
+        raise ProtocolError(
+            E_UNSUPPORTED,
+            f"Неподдерживаемый тип медиа {kind!r} (можно: {', '.join(INBOUND_MEDIA_KINDS)})",
+        )
+    raw = frame.get("data")
+    if not isinstance(raw, str) or not raw:
+        raise ProtocolError(E_BAD_FRAME, "В кадре media нет поля data (base64)")
+    try:
+        payload = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ProtocolError(E_BAD_FRAME, "Поле data не является корректным base64") from exc
+    if not payload:
+        raise ProtocolError(E_BAD_FRAME, "Пустой файл")
+
+    parts = _coerce_int(frame.get("parts"), 1)
+    part = _coerce_int(frame.get("part"), 0)
+    if parts < 1:
+        raise ProtocolError(E_BAD_FRAME, "parts должен быть ≥ 1")
+    if not 0 <= part < parts:
+        raise ProtocolError(E_BAD_FRAME, f"part={part} вне диапазона parts={parts}")
+    if len(payload) > min(MEDIA_CHUNK_BYTES, MAX_MEDIA_BYTES) + 1024:
+        raise ProtocolError(E_TOO_BIG, "Кусок медиа больше допустимого — уменьшите размер кадра")
+    if parts == 1 and len(payload) > MAX_MEDIA_BYTES:
+        raise ProtocolError(
+            E_TOO_BIG, f"Файл больше {MAX_MEDIA_BYTES // (1024 * 1024)} МБ — шлите его кусками (part/parts)"
+        )
+
+    mime = str(frame.get("mime") or "").strip() or guess_mime(frame.get("filename"))
+    return {
+        "kind": kind,
+        "mime": mime[:120],
+        "filename": str(frame.get("filename") or "").strip()[:200] or None,
+        "caption": str(frame.get("caption") or "")[:MAX_TEXT_CHARS],
+        "data": payload,
+        "part": part,
+        "parts": parts,
+        "message_id": client_id(frame) or uuid_hex(),
+    }
+
+
+def parse_prompt_response(frame: Dict[str, Any]) -> Dict[str, Any]:
+    """Разбирает кадр-ответ на карточку: ``{prompt_id, option_id, text}``."""
+    prompt_id = str(frame.get("prompt_id") or "").strip()
+    if not prompt_id:
+        raise ProtocolError(E_BAD_FRAME, "В кадре prompt нет prompt_id")
+    option_id = str(frame.get("option_id") or "").strip().lower()
+    text = str(frame.get("text") or "")
+    if not option_id and not text.strip():
+        raise ProtocolError(E_BAD_FRAME, "В кадре prompt нет ни option_id, ни text")
+    return {"prompt_id": prompt_id[:128], "option_id": option_id[:64], "text": text}
+
+
+def option_allowed(kind: str, option_id: str) -> bool:
+    """Проверяет ответ по типу карточки. Неизвестное значение должно стать безопасным.
+
+    Для одобрения опасной команды безопасное значение — ``deny``, для подтверждения
+    слэш-команды — ``cancel``; адаптер делает эту замену сам, полагаться на клиента нельзя.
+    """
+    option = str(option_id or "").strip().lower()
+    if kind == P_EXEC_APPROVAL:
+        return option in EXEC_APPROVAL_OPTIONS
+    if kind == P_SLASH_CONFIRM:
+        return option in SLASH_CONFIRM_OPTIONS
+    if kind == P_CLARIFY:
+        return option == CLARIFY_OTHER or (len(option) > 1 and option[0] == "c" and option[1:].isdigit())
+    return False
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def uuid_hex() -> str:
+    import uuid as _uuid
+    return _uuid.uuid4().hex
