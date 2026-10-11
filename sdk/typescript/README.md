@@ -69,16 +69,25 @@ client.answerPrompt(prompt.id, 'other', 'мой вариант');   // clarify �
 
 ## Медиа в обе стороны
 
-Отправка — base64, `Uint8Array` или `{ path }` (в Node файл читается с диска).
+Источник можно передать тремя способами: **путь к файлу** (строка или `{ path }` — читается
+с диска в Node), **base64** (строка, не похожая на путь) или **`Uint8Array`** (байты из памяти —
+единственный способ в браузере и React Native, где нет доступа к файловой системе).
 Большие файлы автоматически режутся по 3 МБ на кадры `part`/`parts`:
 
 ```ts
-client.sendImage({ path: '/tmp/chart.png' }, { caption: 'график' });
+client.sendImage('/tmp/chart.png', { caption: 'график' });   // путь — читается с диска (Node)
+client.sendImage({ path: 'chart.png' }, { caption: 'график' }); // то же самое, явной формой
 client.sendDocument(new Uint8Array(pdfBytes), { filename: 'отчёт.pdf' });
 client.sendVoice('/tmp/answer.ogg');
-// произвольный тип (image | video | document | audio):
-client.sendMedia('video', { path: '/tmp/clip.mp4' });
+client.sendImage(base64FromCamera);                            // готовый base64 из приложения
+client.sendMedia('video', '/tmp/clip.mp4');                    // произвольный тип
 ```
+
+!!! warning "Путь или base64?"
+    Строка, похожая на путь (`/tmp/x.png`, `./файл.jpg`, `file://…`, `C:\\…`), читается с диска;
+    всё остальное считается base64. Если путь и base64 различить нельзя — передайте форму
+    `{ path: '…' }`. В браузере и React Native чтения с диска нет: используйте `Uint8Array`
+    (например из `fetch(...).arrayBuffer()`).
 
 Приём — колбэк `onMedia` вызывается один раз на **целый** файл (куски собираются внутри):
 

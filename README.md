@@ -17,6 +17,23 @@
 превращает кадры протокола в `MessageEvent`. Никакой второй истории, второго биллинга и
 отдельного API-слоя.
 
+## 📖 Документация
+
+**Вся документация — на сайте (MkDocs Material): <https://geniok1980.github.io/hermes-mobile-adapter/>**
+
+| Раздел сайта | Для кого |
+|---|---|
+| [Быстрый старт](https://geniok1980.github.io/hermes-mobile-adapter/quickstart/) | разработчик приложения: адрес, токен, первый ответ агента |
+| [Передача разработчику](https://geniok1980.github.io/hermes-mobile-adapter/quickstart/handover/) | владелец агента: что выдать и какие правила сообщить |
+| [Протокол v1](https://geniok1980.github.io/hermes-mobile-adapter/protocol/) | все: кадры, поля, лимиты, коды ошибок, версионирование |
+| [Справочник SDK](https://geniok1980.github.io/hermes-mobile-adapter/reference/typescript/) | все методы и колбэки TypeScript и Python |
+| [Руководства](https://geniok1980.github.io/hermes-mobile-adapter/guides/react-native/) | готовый код: RN/Expo, Flutter, Swift, Kotlin, веб, рецепты, чек-лист приёмки |
+| [Интерфейс приложения](https://geniok1980.github.io/hermes-mobile-adapter/ui/) | что обязательно реализовать и что будет, если не делать |
+| [Установка адаптера](https://geniok1980.github.io/hermes-mobile-adapter/host/) | владелец агента: плагин, wss, доступы |
+
+Страницы сайта лежат в `site-docs/` — исходники и сайт всегда совпадают:
+`pip install -r docs-requirements.txt && ./scripts/build-docs.sh serve`.
+
 ## Что в репозитории
 
 | Каталог | Для кого | Что это |
@@ -26,11 +43,7 @@
 | `sdk/python/` | боты, тесты, скрипты | asyncio-клиент протокола |
 | `examples/web/` | быстрый старт | одна HTML-страница: чат с агентом прямо в браузере |
 | `examples/react-native/` | мобильные | экран диалога + аватар в WebView |
-| `docs/protocol.md` | все | спецификация протокола v1 (кадры, коды ошибок, пределы, медиа, карточки, стриминг) |
-| `docs/integration.md` | все | как встроить в своё приложение: жизненный цикл, токены, аватар, голос, медиа, кнопки, стриминг |
-| `docs/adapter-install.md` | владелец агента | установка плагина на сервер агента, HTTPS/WSS, проверка |
-| `docs/onboarding-developer.md` | разработчик приложения | что получить от владельца агента, подключение, приоритеты интерфейса, правила |
-| `docs/audit-capabilities.md` | контрибьюторы | аудит возможностей адаптера против платформенного API Hermes |
+| `site-docs/` | все | **вся документация** (MkDocs Material) — публикуется на GitHub Pages |
 | `tests/` | контрибьюторы | тесты протокола и адаптера (в т.ч. `tests/test_capabilities.py` — карточки, медиа, правки) |
 
 ## Быстрый старт
@@ -54,7 +67,7 @@ ss -ltn | grep 8787          # адаптер слушает
 hermes pairing list          # при первом контакте — pairing-код, odobрить: hermes pairing approve mobile <id>
 ```
 
-Подробно: [`docs/adapter-install.md`](docs/adapter-install.md).
+Подробно: [`site-docs/host/install.md`](site-docs/host/install.md).
 
 ### 2. Разработчик приложения: подключается
 
@@ -108,8 +121,8 @@ client.sendText('привет, Hermes');
 Коротко: приложение подключается, отправляет `hello` с токеном и получает `ready` с
 `capabilities`; далее кадры `text`/`audio`/`media`/`prompt` вверх и
 `message`/`prompt`/`media`/`typing`/`avatar`/`error` вниз. Полное описание с примерами и
-кодами ошибок — [`docs/protocol.md`](docs/protocol.md), практика — в
-[`docs/integration.md`](docs/integration.md). Адаптер и SDK содержат одну и ту же версию
+кодами ошибок — [`site-docs/protocol/index.md`](site-docs/protocol/index.md), практика — в
+[`site-docs/guides/integration.md`](site-docs/guides/integration.md). Адаптер и SDK содержат одну и ту же версию
 констант (`PROTOCOL_VERSION = 1`); все перечисленные возможности — обратно совместимые
 дополнения, версия протокола не менялась.
 

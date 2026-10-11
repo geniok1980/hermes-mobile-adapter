@@ -1308,7 +1308,15 @@ def interactive_setup() -> None:
     port = prompt("Порт", default=str(DEFAULT_PORT)).strip() or str(DEFAULT_PORT)
     save_env_value("MOBILE_PORT", port)
     if prompt_yes_no("Ограничить список устройств?", default=False):
-        save_env_value("MOBILE_ALLOWED_USERS", prompt("ID устройств через запятую", default="").strip())
+        save_env_value(
+            "MOBILE_ALLOWED_DEVICES",
+            prompt("ID устройств через запятую", default="").strip(),
+        )
+    if prompt_yes_no("Ограничить список пользователей (авторизация Hermes)?", default=False):
+        save_env_value(
+            "MOBILE_ALLOWED_USERS",
+            prompt("ID пользователей через запятую", default="").strip(),
+        )
     save_env_value("MOBILE_HOME_DEVICE", prompt("ID устройства по умолчанию для cron", default="").strip())
     print_success("Платформа Mobile App настроена. Перезапустите шлюз: hermes gateway restart")
 

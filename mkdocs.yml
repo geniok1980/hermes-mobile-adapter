@@ -1,0 +1,93 @@
+site_name: Hermes Mobile Adapter
+site_description: >-
+  Мобильное приложение работает с Hermes Agent напрямую по WebSocket — без своего
+  бэкенда. Протокол v1, карточки-вопросы, медиа, голос, потоковая выдача.
+site_url: https://geniok1980.github.io/hermes-mobile-adapter/
+repo_url: https://github.com/geniok1980/hermes-mobile-adapter
+repo_name: geniok1980/hermes-mobile-adapter
+edit_uri: edit/main/site-docs/
+copyright: MIT License — Hermes Mobile Adapter
+
+docs_dir: site-docs
+site_dir: site
+
+theme:
+  name: material
+  language: ru
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  palette:
+    # Тёмная тема по умолчанию; переключатель в светлую — в шапке.
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Светлая тема
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Тёмная тема
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search:
+      lang: ru
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds: {case: lower}
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Главная: index.md
+  - Быстрый старт:
+      - Начало: quickstart/index.md
+      - Передача разработчику: quickstart/handover.md
+      - Владельцу агента: host/index.md
+      - Установка адаптера: host/install.md
+  - concepts.md
+  - Протокол v1: protocol/index.md
+  - Интерфейс приложения: ui/index.md
+  - Безопасность: security.md
+  - Справочник SDK:
+      - Обзор: reference/index.md
+      - TypeScript: reference/typescript.md
+      - Python: reference/python.md
+  - Руководства:
+      - Как это встроить (обзор): guides/integration.md
+      - React Native: guides/react-native.md
+      - Flutter: guides/flutter.md
+      - iOS / Swift: guides/ios-swift.md
+      - Android / Kotlin: guides/android-kotlin.md
+      - Веб: guides/web.md
+      - Рецепты (cookbook): guides/cookbook.md
+      - Чек-лист приёмки: guides/conformance.md
+  - Диагностика и FAQ: troubleshooting.md
+  - Внутреннее:
+      - Аудит возможностей: host/audit.md

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Hermes">
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="currentColor" stroke-width="3" opacity="0.55"/>
+  <path d="M32 10 L46 24 L32 54 L18 24 Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M18 24 H46" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="25" cy="21" r="2.4" fill="currentColor"/>
+  <circle cx="39" cy="21" r="2.4" fill="currentColor"/>
+</svg>

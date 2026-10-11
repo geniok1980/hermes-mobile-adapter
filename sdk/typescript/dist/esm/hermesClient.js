@@ -45,12 +45,21 @@ export class HermesClient {
     }
     /** Текстовое сообщение агенту. `id` обеспечивает идемпотентность на стороне Hermes. */
     sendText(text, messageId) {
+        if (!String(text ?? '').trim()) {
+            throw new Error('sendText: пустое сообщение — адаптер ответит ошибкой bad_frame');
+        }
         const id = messageId ?? makeId();
         this.send({ t: 'text', id, text });
         return id;
     }
     /** Голосовое сообщение: WAV/OGG в base64 (+ необязательный распознанный текст). */
     sendAudio(base64, format, transcript, messageId) {
+        if (format !== 'wav' && format !== 'ogg') {
+            throw new Error(`sendAudio: поддерживаются только wav и ogg, получено «${String(format)}»`);
+        }
+        if (!base64) {
+            throw new Error('sendAudio: пустая запись');
+        }
         const id = messageId ?? makeId();
         this.send({ t: 'audio', id, format, data: base64, text: transcript });
         return id;
@@ -337,23 +346,52 @@ function normalizeKind(kind) {
     return value;
 }
 function pathName(source) {
+    if (typeof source === 'string')
+        return looksLikePath(source) ? basename(source) : undefined;
     return typeof source === 'object' && source !== null && 'path' in source ? source.path : undefined;
 }
-/** Приводит источник к байтам: base64 → декодируем, путь → читаем с диска (Node). */
+/** Похоже ли значение на путь к файлу, а не на base64 или data-url. */
+function looksLikePath(value) {
+    if (!value || value.length > 4096)
+        return false;
+    if (value.startsWith('data:'))
+        return false; // data-url — это уже содержимое
+    if (/^[A-Za-z]:[\\/]/.test(value))
+        return true; // Windows: C:\… или C:/…
+    if (value.startsWith('file://'))
+        return true;
+    if (value.startsWith('/') || value.startsWith('./') || value.startsWith('../') || value.startsWith('~')) {
+        return true;
+    }
+    // Относительный путь: есть разделитель и расширение в конце — типичный файл, а не base64.
+    return /[\\/]/.test(value) && /\.[A-Za-z0-9]{1,6}$/.test(value);
+}
+function basename(value) {
+    const clean = value.startsWith('file://') ? value.slice(7) : value;
+    return clean.split(/[\\/]/).pop() || clean;
+}
+/** Приводит источник к байтам: base64/data-url → декодируем, путь → читаем с диска (Node). */
 function sourceToBytes(source) {
-    if (typeof source === 'string')
-        return base64ToBytes(source);
+    if (typeof source === 'string') {
+        // Строка может быть как base64, так и путём к файлу — путь распознаём по виду
+        // (в Python-SDK так же), иначе разработчик получает «мусор» из декодированного пути.
+        return looksLikePath(source) ? readLocalFile(source) : base64ToBytes(source);
+    }
     if (source instanceof Uint8Array)
         return source;
     if (source && typeof source === 'object' && 'path' in source) {
-        const readFile = nodeRequire('fs')?.readFileSync;
-        if (typeof readFile !== 'function') {
-            throw new Error('sendMedia: чтение с диска доступно только в Node; передайте base64 или Uint8Array');
-        }
-        const raw = readFile(source.path);
-        return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+        return readLocalFile(source.path);
     }
     throw new Error('sendMedia: неподдерживаемый источник');
+}
+function readLocalFile(path) {
+    const readFile = nodeRequire('fs')?.readFileSync;
+    if (typeof readFile !== 'function') {
+        throw new Error(`sendMedia: файл «${path}» можно прочитать только в Node (fs); в приложении передайте Uint8Array или base64`);
+    }
+    const clean = path.startsWith('file://') ? path.slice(7) : path;
+    const raw = readFile(clean);
+    return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
 }
 /** `require` из Node без статических типов — чтобы файл собирался и в браузере. */
 function nodeRequire(module) {

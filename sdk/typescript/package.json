@@ -1,6 +1,6 @@
 {
   "name": "hermes-mobile-client",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Клиент протокола Hermes Mobile Adapter: подключение приложения, бота или веб-клиента к Hermes Agent по WebSocket (текст, медиа, карточки-вопросы, стриминг)",
   "license": "MIT",
   "type": "module",

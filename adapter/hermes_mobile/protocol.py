@@ -1,7 +1,7 @@
 """Протокол обмена между мобильным приложением и адаптером Hermes Agent.
 
 Модуль намеренно **не зависит от Hermes**: его импортируют и адаптер, и тесты, и
-(через документацию ``docs/protocol.md``) клиентская часть приложения. Вся арифметика
+(через документацию ``site-docs/protocol/index.md``) клиентская часть приложения. Вся арифметика
 протокола — разбор кадров, проверка токена, нарезка длинного текста — живёт здесь и
 покрыта тестами.
 
@@ -55,7 +55,8 @@ S_MESSAGE = "message"    # {t, id, text, chunk:{index,total}, final, edit?}
 S_AVATAR = "avatar"      # {t, state:"idle"|"thinking"|"speaking", mood?}
 S_ERROR = "error"        # {t, code, message, fatal}
 S_PONG = "pong"          # {t, ts}
-S_DELIVERED = "delivered"  # {t, id, device} — ответ на служебную доставку (standalone)
+# Зарезервировано: адаптер эти кадры пока не отправляет (клиенту можно игнорировать).
+S_DELIVERED = "delivered"  # {t, id, device} — подтверждение служебной доставки (cron)
 S_PROMPT = "prompt"      # {t, id, kind, text, options:[{id,label,style?}], session, timeout_seconds}
 S_PROMPT_DONE = "prompt_done"  # {t, id, option_id?, expired?} — карточка закрыта
 S_MEDIA = "media"        # {t, id, kind, mime, filename, caption?, data, part, parts, final, size}
@@ -82,6 +83,8 @@ MEDIA_CHUNK_BYTES = 3 * 1024 * 1024   # размер куска при пере�
 DEFAULT_PROMPT_TTL = 300.0            # столько же, сколько ждёт текстовый фолбэк Hermes
 
 # Коды ошибок протокола (стабильные — клиент показывает их пользователю).
+# E_AUTH_REQUIRED и E_INTERNAL объявлены заранее: адаптер их пока не отправляет
+# (первый кадр не hello → E_BAD_FRAME + закрытие 1008; внутренние сбои закрывают соединение).
 E_AUTH_REQUIRED = "auth_required"
 E_AUTH_FAILED = "auth_failed"
 E_BAD_FRAME = "bad_frame"

@@ -6,7 +6,7 @@ description: >
   Платформенный адаптер для мобильных приложений: поднимает WebSocket-сервер внутри
   Hermes Agent, и приложение подключается к агенту напрямую — текст, голос, ответы агента
   и события для аватара (thinking / speaking / idle). Зависимость — только `websockets`
-  (уже входит в окружение Hermes). Протокол: docs/protocol.md.
+  (уже входит в окружение Hermes). Протокол: site-docs/protocol/index.md.
 author: HermesAI (geniok1980)
 # ``requires_env`` показывается в ``hermes config`` и в ``hermes gateway setup``.
 requires_env:
@@ -43,6 +43,10 @@ optional_env:
   - name: MOBILE_ALLOWED_DEVICES
     description: "Список ID устройств через запятую — дополнительный фильтр адаптера (пусто = любое устройство с валидным токеном)"
     prompt: "Разрешённые устройства"
+    password: false
+  - name: MOBILE_ALLOW_ALL_USERS
+    description: "1/true — принимать любого пользователя с валидным токеном, не сверяя с белым списком (удобно для разработки; в проде лучше MOBILE_ALLOWED_USERS)"
+    prompt: "Разрешить всех пользователей? (1/0)"
     password: false
   - name: MOBILE_EXTRA_TOKENS
     description: "Дополнительные токены (pairing нескольких устройств), через запятую"
