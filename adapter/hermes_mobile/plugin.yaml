@@ -2,6 +2,7 @@ name: hermes-mobile
 label: Mobile App (WebSocket)
 kind: platform
 version: 1.0.0
+requires_hermes: ">=0.21.3"
 description: >
   Платформенный адаптер для мобильных приложений: поднимает WebSocket-сервер внутри
   Hermes Agent, и приложение подключается к агенту напрямую — текст, голос, ответы агента
