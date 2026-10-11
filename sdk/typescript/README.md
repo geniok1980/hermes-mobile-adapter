@@ -3,8 +3,27 @@
 Клиент протокола Hermes Mobile Adapter. Без зависимостей: используется стандартный
 `WebSocket`, поэтому работает в React Native/Expo, в браузере, в Electron и в Node 22+.
 
+## Установка
+
+```bash
+npm i hermes-mobile-client
+```
+
+Пакет собран в двух форматах: `import` (ESM — RN, Expo, web, сборщики) и `require`
+(CommonJS — обычные Node-скрипты), типы прилагаются. Никаких рантайм-зависимостей.
+
+```js
+// CommonJS
+const { HermesClient } = require('hermes-mobile-client');
+
+// ESM
+import { HermesClient } from 'hermes-mobile-client';
+```
+
+Опубликованная версия: https://www.npmjs.com/package/hermes-mobile-client
+
 ```ts
-import { HermesClient } from './hermesClient';
+import { HermesClient } from 'hermes-mobile-client';
 
 const client = new HermesClient({
   url: 'wss://agent.example.com/ws',

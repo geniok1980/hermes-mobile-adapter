@@ -57,10 +57,14 @@ hermes pairing list          # при первом контакте — pairing-
 
 ### 2. Разработчик приложения: подключается
 
-Минимальный путь — TypeScript SDK (30 строк):
+Минимальный путь — TypeScript SDK. Ставится из npm:
+
+```bash
+npm i hermes-mobile-client
+```
 
 ```ts
-import { HermesClient } from './sdk/typescript/hermesClient';
+import { HermesClient } from 'hermes-mobile-client';
 
 const client = new HermesClient({
   url: 'wss://<хост-агента>/ws',         // или ws://<хост>:8787/ws в локальной сети
