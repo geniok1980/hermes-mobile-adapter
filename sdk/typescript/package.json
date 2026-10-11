@@ -1,0 +1,20 @@
+{
+  "name": "hermes-mobile-client",
+  "version": "1.0.0",
+  "description": "Клиент протокола Hermes Mobile Adapter: подключение мобильного приложения к Hermes Agent",
+  "license": "MIT",
+  "main": "hermesClient.ts",
+  "types": "hermesClient.ts",
+  "files": ["hermesClient.ts", "README.md"],
+  "keywords": ["hermes", "agent", "websocket", "react-native", "expo", "chat", "ai"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geniok1980/hermes-mobile-adapter.git"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit --strict --target ES2020 --module ESNext --moduleResolution bundler hermesClient.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  }
+}

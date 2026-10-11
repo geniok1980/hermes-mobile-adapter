@@ -1,0 +1,46 @@
+name: hermes-mobile
+label: Mobile App (WebSocket)
+kind: platform
+version: 1.0.0
+description: >
+  Платформенный адаптер для мобильных приложений: поднимает WebSocket-сервер внутри
+  Hermes Agent, и приложение подключается к агенту напрямую — текст, голос, ответы агента
+  и события для аватара (thinking / speaking / idle). Зависимость — только `websockets`
+  (уже входит в окружение Hermes). Протокол: docs/protocol.md.
+author: HermesAI (geniok1980)
+# ``requires_env`` показывается в ``hermes config`` и в ``hermes gateway setup``.
+requires_env:
+  - name: MOBILE_TOKEN
+    description: "Общий секрет приложения (авторизация WS-подключения)"
+    prompt: "Токен приложения (openssl rand -hex 32)"
+    password: true
+# ``optional_env`` — необязательные настройки со значениями по умолчанию.
+optional_env:
+  - name: MOBILE_HOST
+    description: "Адрес, на котором слушает адаптер (по умолчанию 0.0.0.0)"
+    prompt: "Host (0.0.0.0)"
+    password: false
+  - name: MOBILE_PORT
+    description: "Порт WebSocket-сервера адаптера (по умолчанию 8787)"
+    prompt: "Порт (8787)"
+    password: false
+  - name: MOBILE_PATH
+    description: "Путь WebSocket-эндпоинта (по умолчанию /ws)"
+    prompt: "Путь (/ws)"
+    password: false
+  - name: MOBILE_AVATAR_URL
+    description: "URL HTML-страницы аватара, которую открывает приложение"
+    prompt: "URL аватара"
+    password: false
+  - name: MOBILE_HOME_DEVICE
+    description: "Устройство по умолчанию для доставки сообщений (cron → deliver=mobile)"
+    prompt: "ID устройства по умолчанию"
+    password: false
+  - name: MOBILE_ALLOWED_USERS
+    description: "Список разрешённых устройств через запятую (пусто = любое устройство с валидным токеном)"
+    prompt: "Разрешённые устройства"
+    password: false
+  - name: MOBILE_EXTRA_TOKENS
+    description: "Дополнительные токены (pairing нескольких устройств), через запятую"
+    prompt: "Доп. токены"
+    password: true

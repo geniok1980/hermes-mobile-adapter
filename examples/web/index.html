@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hermes Mobile Adapter — проверка в браузере</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0b0f; --surface:#14141b; --border:#262633; --text:#f2f4f8; --muted:#9ba3b4; --accent:#5b8def; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.5 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; display:flex; justify-content:center; }
+  .app { width:100%; max-width:720px; padding:20px; display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:18px; margin:0; font-weight:600; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  input, button { font:inherit; color:inherit; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
+  input { flex:1; min-width:180px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #status { color:var(--muted); font-size:13px; }
+  #avatar { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#3a3a4a; transition:background .2s; }
+  .dot.thinking { background:#f5a524; } .dot.speaking { background:#3dd68c; }
+  #log { flex:1; min-height:45vh; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  .msg { padding:10px 12px; border-radius:12px; max-width:85%; white-space:pre-wrap; word-wrap:break-word; }
+  .me { align-self:flex-end; background:rgba(91,141,239,.16); border:1px solid var(--accent); }
+  .agent { align-self:flex-start; background:#1c1c25; }
+  .sys { align-self:center; color:var(--muted); font-size:12px; }
+  code { background:#1c1c25; padding:1px 5px; border-radius:5px; }
+  details { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Hermes Mobile Adapter — живой пример</h1>
+
+  <div class="row">
+    <input id="url" value="ws://127.0.0.1:8787/ws" placeholder="ws(s)://хост/ws" />
+    <input id="token" type="password" placeholder="MOBILE_TOKEN" />
+    <input id="device" value="web-demo" placeholder="id устройства" style="max-width:160px" />
+    <button class="primary" id="connect">Подключиться</button>
+  </div>
+
+  <div id="status">Не подключено. Токен берётся у владельца агента (<code>MOBILE_TOKEN</code> в <code>~/.hermes/.env</code>).</div>
+  <div id="avatar"><span class="dot" id="dot"></span><span id="avatarText">аватар: —</span></div>
+
+  <div id="log"></div>
+
+  <div class="row">
+    <input id="text" placeholder="Сообщение агенту…" />
+    <button class="primary" id="send">Отправить</button>
+    <button id="home">/sethome</button>
+  </div>
+
+  <details>
+    <summary>Что происходит под капотом</summary>
+    Эта страница — эталонная реализация протокола на голом JS: <code>hello</code> → <code>ready</code>,
+    затем <code>text</code> вверх и <code>message</code>/<code>typing</code>/<code>avatar</code>/<code>error</code> вниз.
+    Никакой библиотеки: любой рантайм с WebSocket (Swift, Kotlin, Dart, RN) делает ровно это же.
+    Типы и готовый клиент — в <code>sdk/typescript/hermesClient.ts</code>.
+  </details>
+</div>
+
+<script>
+(() => {
+  const el = (id) => document.getElementById(id);
+  let socket = null;
+  const PROTOCOL_VERSION = 1;
+
+  const log = (text, cls = 'agent') => {
+    const div = document.createElement('div');
+    div.className = `msg ${cls}`;
+    div.textContent = text;
+    el('log').appendChild(div);
+    el('log').scrollTop = el('log').scrollHeight;
+    return div;
+  };
+
+  const status = (text) => { el('status').textContent = text; };
+  const setAvatar = (state) => {
+    el('dot').className = `dot ${state === 'thinking' || state === 'speaking' ? state : ''}`;
+    el('avatarText').textContent = `аватар: ${state}`;
+  };
+
+  const frame = (obj) => JSON.stringify(obj);
+
+  function handle(raw) {
+    let data;
+    try { data = JSON.parse(raw); } catch { return; }
+    switch (data.t) {
+      case 'ready':
+        status(`Подключено. Сессия: ${data.session}${data.v !== PROTOCOL_VERSION ? ` (шлюз v${data.v})` : ''}`);
+        log(`Подключено как ${data.session}`, 'sys');
+        break;
+      case 'typing':
+        setAvatar('thinking');
+        break;
+      case 'avatar':
+        setAvatar(data.state);
+        break;
+      case 'message': {
+        const key = data.id;
+        const existing = document.querySelector(`[data-msg="${key}"]`);
+        if (existing) { existing.textContent += data.text; }
+        else { const node = log(data.text); node.dataset.msg = key; }
+        el('log').scrollTop = el('log').scrollHeight;
+        break;
+      }
+      case 'error':
+        status(`Ошибка ${data.code}: ${data.message}`);
+        log(`⚠️ ${data.code}: ${data.message}`, 'sys');
+        break;
+    }
+  }
+
+  el('connect').addEventListener('click', () => {
+    if (socket) { socket.close(); socket = null; }
+    const url = el('url').value.trim();
+    const token = el('token').value.trim();
+    const deviceId = el('device').value.trim() || 'web-demo';
+    if (!token) { status('Укажите токен приложения'); return; }
+    status('Подключаюсь…');
+    socket = new WebSocket(`${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`);
+
+    socket.onopen = () => socket.send(frame({ t: 'hello', v: PROTOCOL_VERSION, token, device: { id: deviceId, name: 'Браузер', platform: 'web', app_version: '1.0.0' } }));
+    socket.onmessage = (event) => handle(String(event.data));
+    socket.onerror = () => status('Ошибка соединения: проверьте адрес и доступность порта');
+    socket.onclose = (event) => status(event.code === 1008 ? 'Доступ запрещён: неверный токен (код 1008)' : `Соединение закрыто (${event.code})`);
+  });
+
+  const send = (text) => {
+    if (!socket || socket.readyState !== 1) { status('Сначала подключитесь'); return; }
+    const value = text.trim();
+    if (!value) return;
+    socket.send(frame({ t: 'text', id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, text: value }));
+    log(value, 'me');
+  };
+
+  el('send').addEventListener('click', () => { send(el('text').value); el('text').value = ''; });
+  el('text').addEventListener('keydown', (e) => { if (e.key === 'Enter') { send(el('text').value); el('text').value = ''; } });
+  el('home').addEventListener('click', () => send('/sethome'));
+})();
+</script>
+</body>
+</html>

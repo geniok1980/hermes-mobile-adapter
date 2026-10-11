@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  adapter-tests:
+    # Тесты поднимают настоящий WebSocket-сервер адаптера и требуют Hermes Agent
+    # (платформенный API: gateway.platforms.*). Ставим Hermes из публичного репозитория.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install websockets>=12 pytest
+
+      - name: Hermes Agent (для платформенного API)
+        run: |
+          if [ ! -d /usr/local/lib/hermes-agent ]; then
+            curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+          fi
+          python -c "import gateway.platforms.base as b; print('Hermes API:', b.__file__)" \
+            || echo "Hermes недоступен — тесты протокола всё равно пройдут"
+
+      - name: Тесты протокола и адаптера
+        run: python -m unittest discover -s tests -v
+
+      - name: Типчек TypeScript SDK
+        run: |
+          cd sdk/typescript
+          npm install --silent
+          npx tsc --noEmit --strict --target ES2020 --module ESNext --moduleResolution bundler hermesClient.ts
