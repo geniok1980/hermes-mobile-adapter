@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node / React Native
+node_modules/
+.expo/
+*.log
+
+# Секреты и локальные данные
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Прочее
+.DS_Store
+.idea/
+.vscode/
