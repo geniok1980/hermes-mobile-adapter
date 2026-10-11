@@ -33,7 +33,8 @@ printf 'MOBILE_HOST=0.0.0.0\nMOBILE_PORT=8787\nMOBILE_PATH=/ws\n' >> ~/.hermes/.
 | `MOBILE_TOKEN` | обязательный общий секрет приложения (авторизация WS) |
 | `MOBILE_HOST` / `MOBILE_PORT` / `MOBILE_PATH` | где слушает адаптер (по умолчанию `0.0.0.0:8787/ws`) |
 | `MOBILE_AVATAR_URL` | HTML-страница аватара, которую открывает приложение (приходит в кадре `ready`) |
-| `MOBILE_ALLOWED_USERS` | список `device.id` через запятую (пусто — любое устройство с валидным токеном) |
+| `MOBILE_ALLOWED_USERS` | список пользователей через запятую — проверяет сам Hermes (авторизация, pairing) |
+| `MOBILE_ALLOWED_DEVICES` | список `device.id` через запятую — дополнительный фильтр адаптера (пусто — любое устройство с валидным токеном) |
 | `MOBILE_ALLOW_ALL_USERS` | `1`/`true` — принимать любое устройство с валидным токеном, не сверяя с белым списком (удобно для быстрой проверки и разработки; в проде лучше `MOBILE_ALLOWED_USERS`) |
 | `MOBILE_EXTRA_TOKENS` | дополнительные токены — если приложений/разработчиков несколько |
 | `MOBILE_HOME_DEVICE` | устройство по умолчанию для доставки cron (`deliver=mobile`) |
@@ -88,7 +89,8 @@ hermes pairing list
 hermes pairing approve mobile <request-id>     # или <код из сообщения>
 ```
 
-Либо заранее: `MOBILE_ALLOWED_USERS=<device.id>` + перезапуск шлюза.
+Либо заранее: `MOBILE_ALLOWED_DEVICES=<device.id>` (фильтр устройств) или
+`MOBILE_ALLOWED_USERS=<id пользователя>` (штатная авторизация Hermes, без pairing).
 
 ## 4. Наружу — HTTPS/WSS
 
@@ -112,7 +114,8 @@ agent.example.com {
 
 * Разные команды/приложения — разные токены: `MOBILE_TOKEN` (первое) и
   `MOBILE_EXTRA_TOKENS=tok2,tok3` (остальные). Каждому — свой `device.id`.
-* Ограничить, кто вообще может подключиться: `MOBILE_ALLOWED_USERS=app-a,app-b`.
+* Ограничить, какие устройства вообще подключаются: `MOBILE_ALLOWED_DEVICES=app-a,app-b`
+  (кто из пользователей допущен — решает штатная авторизация Hermes: `MOBILE_ALLOWED_USERS`, pairing).
 * Сессии в Hermes разделяются по `device.id`, поэтому диалоги не смешиваются.
 
 ## 6. Доставка из cron
@@ -138,7 +141,7 @@ hermes gateway restart
 |---|---|
 | `bind_failed: не удалось занять 0.0.0.0:8787` | порт занят: `ss -ltnp \| grep 8787`, смените `MOBILE_PORT` |
 | `config_missing: MOBILE_TOKEN не задан` | нет токена в `.env` профиля — платформа без токена не поднимается (это защита: адаптер не бывает «открытым») |
-| приложение получает `auth_failed` | токен в приложении ≠ `MOBILE_TOKEN`, либо устройство вне `MOBILE_ALLOWED_USERS` |
+| приложение получает `auth_failed` | токен в приложении ≠ `MOBILE_TOKEN`, либо устройство вне `MOBILE_ALLOWED_DEVICES`, либо пользователь не одобрен Hermes (`MOBILE_ALLOWED_USERS` / pairing) |
 | `ready` есть, ответов нет | устройство не одобрено (`hermes pairing approve mobile …`) |
 | плагин не виден в `hermes plugins list` | проверьте путь `~/.hermes/plugins/<name>/plugin.yaml` и `plugins.enabled` в `config.yaml` |
 | `websockets` не установлен | адаптер поставит его сам при подключении (`ensure_deps_fn`); вручную: `pip install websockets>=12` |

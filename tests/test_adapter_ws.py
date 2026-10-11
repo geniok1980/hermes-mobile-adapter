@@ -381,7 +381,7 @@ class TestOutbound(BaseWS):
 
 class TestAllowedUsers(BaseWS):
     async def test_device_not_in_whitelist_is_rejected(self):
-        self.adapter.allowed_users = ["dev-allowed"]
+        self.adapter.allowed_devices = ["dev-allowed"]
         await self.adapter.connect()
         async with websockets.connect(self.url()) as websocket:
             frame = await self.hello(websocket, device_id="dev-чужой")
@@ -392,15 +392,15 @@ class TestEnvEnablement(BaseWS):
     async def test_env_enablement_seeds_extra(self):
         os.environ["MOBILE_TOKEN"] = "e" * 64
         os.environ["MOBILE_PORT"] = "9999"
-        os.environ["MOBILE_ALLOWED_USERS"] = "dev-1, dev-2"
+        os.environ["MOBILE_ALLOWED_DEVICES"] = "dev-1, dev-2"
         try:
             seed = mobile_adapter._env_enablement()
         finally:
-            for key in ("MOBILE_TOKEN", "MOBILE_PORT", "MOBILE_ALLOWED_USERS"):
+            for key in ("MOBILE_TOKEN", "MOBILE_PORT", "MOBILE_ALLOWED_DEVICES"):
                 os.environ.pop(key, None)
         self.assertEqual(seed["token"], "e" * 64)
         self.assertEqual(seed["port"], 9999)
-        self.assertEqual(seed["allowed_users"], ["dev-1", "dev-2"])
+        self.assertEqual(seed["allowed_devices"], ["dev-1", "dev-2"])
 
     async def test_env_enablement_returns_none_without_token(self):
         self.assertIsNone(mobile_adapter._env_enablement())

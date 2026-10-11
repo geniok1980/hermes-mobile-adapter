@@ -10,7 +10,7 @@
 |---|---|---|
 | Адрес адаптера | `MOBILE_HOST`/`MOBILE_PORT`/`MOBILE_PATH` на машине агента, либо домен через reverse-proxy | `wss://agent.example.com/ws` |
 | Токен приложения | `MOBILE_TOKEN` в `~/.hermes/.env` | 64 hex-символа |
-| Разрешение устройству | `hermes pairing approve mobile <id>` после первого контакта, либо заранее `MOBILE_ALLOWED_USERS`, либо `MOBILE_ALLOW_ALL_USERS=1` | `hermes pairing approve mobile 84b9042da9357a03` |
+| Разрешение устройству | `hermes pairing approve mobile <id>` после первого контакта либо заранее `MOBILE_ALLOWED_USERS=<id пользователя>`; отдельный фильтр устройств — `MOBILE_ALLOWED_DEVICES` | `hermes pairing approve mobile 84b9042da9357a03` |
 
 Идентификатор устройства (`device.id`) выбирает приложение и держит его постоянным: от него
 зависит идентификатор сессии в Hermes (`mobile:<device.id>`), адрес для cron-доставки и
@@ -313,7 +313,7 @@ channel.stream.listen((raw) {
 
 | Симптом | Причина |
 |---|---|
-| `auth_failed` / закрытие 1008 | токен не совпадает с `MOBILE_TOKEN`, либо `device.id` отсутствует в `MOBILE_ALLOWED_USERS` (и не задано `MOBILE_ALLOW_ALL_USERS=1`) |
+| `auth_failed` / закрытие 1008 | токен не совпадает с `MOBILE_TOKEN`, либо `device.id` отсутствует в `MOBILE_ALLOWED_DEVICES`, либо пользователь ещё не одобрен Hermes (`MOBILE_ALLOWED_USERS` / pairing / `MOBILE_ALLOW_ALL_USERS=1`) |
 | `ready` приходит, ответов нет | устройство ещё не одобрено: `hermes pairing list` → `approve`; на первом контакте агент отвечает pairing-кодом |
 | Ответ «No home channel is set» | штатное напоминание Hermes: отправьте `/sethome`, чтобы этот чат стал домашним (туда уходят cron-сообщения) |
 | `device_offline` в cron-доставке | приложение не подключено: мобильная доставка требует живого соединения |

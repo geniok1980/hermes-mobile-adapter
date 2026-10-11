@@ -37,7 +37,11 @@ optional_env:
     prompt: "ID устройства по умолчанию"
     password: false
   - name: MOBILE_ALLOWED_USERS
-    description: "Список разрешённых устройств через запятую (пусто = любое устройство с валидным токеном)"
+    description: "Список пользователей через запятую — проверяет сам Hermes (авторизация и pairing)"
+    prompt: "Разрешённые пользователи"
+    password: false
+  - name: MOBILE_ALLOWED_DEVICES
+    description: "Список ID устройств через запятую — дополнительный фильтр адаптера (пусто = любое устройство с валидным токеном)"
     prompt: "Разрешённые устройства"
     password: false
   - name: MOBILE_EXTRA_TOKENS

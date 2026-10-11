@@ -164,10 +164,15 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self.path = "/" + raw_path.strip().strip("/")
         self.avatar_url = str(_env_or_extra(extra, "MOBILE_AVATAR_URL", "avatar_url", "") or "").strip()
 
-        allowed = extra.get("allowed_users") or proto.split_tokens(
-            _get_scoped_secret("MOBILE_ALLOWED_USERS", "")
+        # Белый список устройств — отдельный от пользовательского: MOBILE_ALLOWED_USERS
+        # проверяет сам Hermes (это список пользователей, там pairing/политики), а устройства
+        # ограничиваем отдельной переменной, чтобы одно имя не значило две разные вещи.
+        allowed_devices = extra.get("allowed_devices") or proto.split_tokens(
+            _get_scoped_secret("MOBILE_ALLOWED_DEVICES", "")
         )
-        self.allowed_users: List[str] = [str(a).strip() for a in allowed if str(a).strip()]
+        if isinstance(allowed_devices, str):
+            allowed_devices = proto.split_tokens(allowed_devices)
+        self.allowed_devices: List[str] = [str(a).strip() for a in allowed_devices if str(a).strip()]
         self.home_device = str(extra.get("home_device") or _get_scoped_secret("MOBILE_HOME_DEVICE", "") or "").strip()
 
         max_len = extra.get("max_message_length")
@@ -245,7 +250,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self._mark_connected(listener_base=self.listener_base)
         logger.info(
             "hermes-mobile: слушаю ws://%s:%s%s (устройств в белом списке: %d)",
-            self.host, self.port, self.path, len(self.allowed_users),
+            self.host, self.port, self.path, len(self.allowed_devices),
         )
         return True
 
@@ -293,7 +298,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
 
             info = proto.parse_device(frame)
             candidate = info.get("id") or proto.parse_user(frame).get("id") or ""
-            if not proto.device_allowed(candidate, self.allowed_users):
+            if not proto.device_allowed(candidate, self.allowed_devices):
                 logger.warning("hermes-mobile: устройство %s не в списке разрешённых", candidate or "<без id>")
                 await self._reject(websocket, proto.E_AUTH_FAILED, "Устройство не в списке разрешённых")
                 return
@@ -1193,7 +1198,7 @@ def _env_enablement() -> Optional[dict]:
             ("MOBILE_PORT", "port", int),
             ("MOBILE_PATH", "path", None),
             ("MOBILE_AVATAR_URL", "avatar_url", None),
-            ("MOBILE_ALLOWED_USERS", "allowed_users", lambda v: proto.split_tokens(v)),
+            ("MOBILE_ALLOWED_DEVICES", "allowed_devices", lambda v: proto.split_tokens(v)),
             ("MOBILE_EXTRA_TOKENS", "extra_tokens", lambda v: proto.split_tokens(v)),
         ),
         home_env="MOBILE_HOME_DEVICE",

@@ -1,20 +1,47 @@
 {
   "name": "hermes-mobile-client",
   "version": "1.0.0",
-  "description": "Клиент протокола Hermes Mobile Adapter: подключение мобильного приложения к Hermes Agent",
+  "description": "Клиент протокола Hermes Mobile Adapter: подключение приложения, бота или веб-клиента к Hermes Agent по WebSocket (текст, медиа, карточки-вопросы, стриминг)",
   "license": "MIT",
-  "main": "hermesClient.ts",
-  "types": "hermesClient.ts",
-  "files": ["hermesClient.ts", "README.md"],
-  "keywords": ["hermes", "agent", "websocket", "react-native", "expo", "chat", "ai"],
+  "type": "module",
+  "main": "dist/hermesClient.js",
+  "types": "dist/hermesClient.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/hermesClient.d.ts",
+      "import": "./dist/hermesClient.js",
+      "default": "./dist/hermesClient.js"
+    }
+  },
+  "files": ["dist", "hermesClient.ts", "README.md"],
+  "keywords": [
+    "hermes",
+    "hermes-agent",
+    "websocket",
+    "mobile",
+    "react-native",
+    "expo",
+    "chat",
+    "ai",
+    "agent"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/geniok1980/hermes-mobile-adapter.git"
+    "url": "git+https://github.com/geniok1980/hermes-mobile-adapter.git"
+  },
+  "homepage": "https://github.com/geniok1980/hermes-mobile-adapter#readme",
+  "bugs": {
+    "url": "https://github.com/geniok1980/hermes-mobile-adapter/issues"
   },
   "scripts": {
+    "build": "tsc hermesClient.ts --outDir dist --declaration --target ES2020 --module ES2020 --moduleResolution bundler --skipLibCheck",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit --strict --target ES2020 --module ESNext --moduleResolution bundler hermesClient.ts"
   },
   "devDependencies": {
     "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
