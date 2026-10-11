@@ -1,0 +1,9 @@
+# Зависимости сборки сайта документации (MkDocs Material).
+# Используется и локально, и в CI (.github/workflows/docs.yml).
+#
+#   pip install -r docs-requirements.txt
+#   mkdocs serve          # локальный просмотр с автоперезагрузкой
+#   mkdocs build -d site  # сборка статики
+#
+# Документация: https://squidfunk.github.io/mkdocs-material/
+mkdocs-material>=9.5

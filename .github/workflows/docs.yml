@@ -31,8 +31,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Установить mkdocs-material
-        run: pip install "mkdocs-material>=9"
+      - name: Установить MkDocs Material
+        run: pip install -r docs-requirements.txt
 
       - name: Собрать сайт
         run: mkdocs build -d site
