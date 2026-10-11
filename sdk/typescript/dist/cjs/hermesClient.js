@@ -9,7 +9,7 @@
  * показанного сообщения (`message.edit` — потоковая выдача). Ничего не знает про UI —
  * только колбэки. Никаких зависимостей: стандартный WebSocket.
  *
- * Спецификация: docs/protocol.md
+ * Спецификация: site-docs/protocol/index.md
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.HermesClient = exports.MEDIA_CHUNK_BYTES = exports.PROTOCOL_VERSION = void 0;

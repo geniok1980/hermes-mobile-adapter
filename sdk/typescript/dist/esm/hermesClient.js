@@ -8,7 +8,7 @@
  * показанного сообщения (`message.edit` — потоковая выдача). Ничего не знает про UI —
  * только колбэки. Никаких зависимостей: стандартный WebSocket.
  *
- * Спецификация: docs/protocol.md
+ * Спецификация: site-docs/protocol/index.md
  */
 export const PROTOCOL_VERSION = 1;
 /** Размер куска при отправке больших файлов (protocol.MEDIA_CHUNK_BYTES). */
