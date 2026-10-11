@@ -20,3 +20,8 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# Сборка сайта документации и артефакты npm-пакета
+site/
+site-docs/site/
+*.tgz
