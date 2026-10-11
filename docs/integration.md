@@ -10,7 +10,7 @@
 |---|---|---|
 | Адрес адаптера | `MOBILE_HOST`/`MOBILE_PORT`/`MOBILE_PATH` на машине агента, либо домен через reverse-proxy | `wss://agent.example.com/ws` |
 | Токен приложения | `MOBILE_TOKEN` в `~/.hermes/.env` | 64 hex-символа |
-| Разрешение устройству | `hermes pairing approve mobile <id>` после первого контакта, либо заранее `MOBILE_ALLOWED_USERS` | `hermes pairing approve mobile 84b9042da9357a03` |
+| Разрешение устройству | `hermes pairing approve mobile <id>` после первого контакта, либо заранее `MOBILE_ALLOWED_USERS`, либо `MOBILE_ALLOW_ALL_USERS=1` | `hermes pairing approve mobile 84b9042da9357a03` |
 
 Идентификатор устройства (`device.id`) выбирает приложение и держит его постоянным: от него
 зависит идентификатор сессии в Hermes (`mobile:<device.id>`), адрес для cron-доставки и
@@ -21,7 +21,7 @@
 ```
 connect() → отправляем hello{token, device} → ждём ready{session, avatar_url, capabilities}
     ↓
-текст/голос вверх (text/audio) ⟷ ответы вниз (message, typing, avatar, error)
+текст/голос/медиа вверх (text/audio/media) ⟷ ответы вниз (message, prompt, media, typing, avatar, error)
     ↓
 обрыв сети → переподключение с паузой → снова hello (история и сессия сохраняются на стороне Hermes)
 ```
@@ -44,9 +44,147 @@ connect() → отправляем hello{token, device} → ждём ready{sessi
 ответ выглядит как одно сообщение. Пока `final` не пришёл, показывайте индикатор.
 
 Кадры `avatar` (`thinking` / `speaking` / `idle`) и `typing` — сигналы для интерфейса:
-анимация аватара, «агент печатает», отключение кнопки отправки.
+анимация аватара, «агент печатает», отключение кнопки отправки. Кадр `typing` с `stop: true`
+означает «выключить индикатор немедленно» (агент закончил) — обработайте его так же, как
+финал ответа.
 
-## 4. Голос
+## 4. Кнопки вместо текста (карточки-вопросы)
+
+Иногда агент не отвечает текстом, а просит выбор: одобрить опасную команду, подтвердить
+слэш-команду или уточнить запрос. Приходит кадр `prompt` с готовыми кнопками:
+
+```json
+{"t":"prompt","id":"5f6a…","kind":"clarify","text":"Какой формат нужен?","options":[{"id":"c0","label":"CSV","style":""},{"id":"c1","label":"JSON","style":""},{"id":"other","label":"✏️ Свой ответ","style":""}],"session":"mobile:tel-1","timeout_seconds":300}
+```
+
+Что делает приложение:
+
+1. Показывает `text` и кнопки из `options` (`label` — подпись, `style` — подсказка
+   оформления: `primary`/`danger`/пусто).
+2. На нажатие отправляет **один кадр** `prompt` с `id` карточки и `option_id`:
+
+```json
+{"t":"prompt","prompt_id":"5f6a…","option_id":"c1"}
+```
+
+3. Ждёт `prompt_done`. Если он пришёл с `expired: true` — карточка истекла (по умолчанию
+   через 300 с), просто закройте её.
+
+Особенности:
+
+* Ответ на карточку **не становится сообщением в чате** — адаптер резолвит его штатными
+  механизмами Hermes (одобрение / подтверждение / уточнение). Поэтому не дублируйте выбор
+  отдельным `text`.
+* Для `clarify` вариант `other` означает «пользователь введёт свой ответ»: отправьте кадр
+  с `option_id: "other"` и полем `text`, либо сразу `{"t":"prompt","prompt_id":"…","text":"…"}`
+  без `option_id`.
+* Не подставляйте свой `option_id` наугад: сервер сам заменит недопустимое значение на
+  безопасное (`deny` для одобрения, `cancel` для подтверждения) и вернёт фактический выбор
+  в `prompt_done.option_id`.
+* Если карточка уже истекла/неизвестна, ответ не сломает соединение: придёт
+  `prompt_done{expired:true}`.
+
+## 5. Медиа
+
+### Отправка медиа агенту
+
+Один файл — один или несколько кадров `media`. Для файла ≤ 8 МБ хватит одного кадра
+(`parts: 1`); крупнее — шлите кусками по ~3 МБ (`part: 0,1,2…`), адаптер соберёт их и
+отдаст агенту целый файл.
+
+```json
+{"t":"media","id":"m1","kind":"image","mime":"image/jpeg","filename":"photo.jpg","caption":"Смотри","data":"<base64>","part":0,"parts":1}
+```
+
+```kotlin
+// Kotlin: отправка фото одним кадром
+val bytes = File(path).readBytes()
+ws.send(JSONObject(mapOf(
+  "t" to "media", "id" to mid, "kind" to "image",
+  "mime" to "image/jpeg", "filename" to "photo.jpg",
+  "caption" to "Смотри", "data" to Base64.encodeToString(bytes, Base64.NO_WRAP),
+  "part" to 0, "parts" to 1
+)).toString())
+```
+
+```dart
+// Dart: отправка кусками
+final bytes = await File(path).readAsBytes();
+const chunk = 3 * 1024 * 1024;
+final parts = (bytes.length / chunk).ceil();
+for (var i = 0; i < parts; i++) {
+  final slice = bytes.sublist(i * chunk, min((i + 1) * chunk, bytes.length));
+  channel.sink.add(jsonEncode({'t': 'media', 'id': mid, 'kind': 'document',
+    'mime': 'application/pdf', 'filename': 'report.pdf',
+    'data': base64Encode(slice), 'part': i, 'parts': parts}));
+}
+```
+
+Правила: `kind` — `image` / `video` / `document` / `audio`; досылайте **все** `part` до
+`parts-1` (серия без последнего куска не собирается и агенту не уходит); `id` держите
+постоянным для всех кусков одного файла. Если в приведённом выше примере `parts` для
+документа больше 1, финальный кусок имеет `part == parts - 1`.
+
+### Приём медиа от агента
+
+Агент может прислать картинку, голос, видео, файл или анимацию — всё это кадры `media`:
+
+```json
+{"t":"media","id":"a1","kind":"image","mime":"image/png","filename":"chart.png","caption":"График","part":0,"parts":1,"final":true,"size":20480,"data":"<base64>"}
+```
+
+```swift
+// Swift: приём и сохранение файла на диск
+func onMedia(_ f: [String: Any]) {
+  guard let id = f["id"] as? String, let data = f["data"] as? String,
+        let chunk = Data(base64Encoded: data) else { return }
+  var buffer = self.mediaBuffers[id] ?? Data()
+  buffer.append(chunk); self.mediaBuffers[id] = buffer
+  if f["final"] as? Bool == true {
+    let name = (f["filename"] as? String) ?? "file"
+    try? buffer.write(to: docDir.appendingPathComponent(name))
+    self.mediaBuffers[id] = nil; self.showMedia(name, f["caption"] as? String)
+  }
+}
+```
+
+Правила: собирайте куски по `id`; файл готов, когда пришёл кадр с `final: true`; если у кадра
+есть `url`, файла в `data` может не быть — скачайте по ссылке; ориентируйтесь на `mime` и
+`filename` при сохранении. Лимит одного файла — 8 МБ (`max_media_bytes` из `capabilities`).
+
+## 6. Потоковая выдача ответа
+
+Если на стороне агента включён стриминг, ответ сначала приходит целиком, а потом **правится
+по мере генерации**. Признак правки — поле `edit: true` в кадре `message` с тем же `id`:
+
+```json
+{"t":"message","id":"r1","text":"Считаю","edit":true,"chunk":{"index":0,"total":1},"final":false}
+{"t":"message","id":"r1","text":"Считаю ответ…","edit":true,"chunk":{"index":0,"total":1},"final":true}
+```
+
+Приложение хранит сообщения по `id`: при `edit: true` оно **перерисовывает** существующее
+сообщение, а не добавляет новое. `final: true` в правке — конец. Обрабатывать `edit`
+необязательно: если его игнорировать, кадры покажутся как новые сообщения (будут дубли) —
+поэтому для аккуратного вида лучше перерисовывать по `id`.
+
+Стриминг и индикатор «печатает» независимы: пока генерация идёт, аватар в `thinking`;
+после последней правки приходит `typing{stop:true}` и через паузу `avatar:idle`.
+
+## 7. Как не сломаться на неизвестных кадрах
+
+Протокол расширяется только за счёт **необязательных** полей и новых типов кадров, поэтому:
+
+* Разбирайте кадр по полю `t`; неизвестный `t` — молча игнорируйте (не рвите соединение).
+* Не считайте поля обязательными, если они помечены как необязательные (`edit`, `stop`,
+  `url`, `reply_to`, `caption` и т.п.) — проверяйте их наличие.
+* Не падайте на незнакомом `kind` карточки или медиа: покажите общий вид и ждите
+  `prompt_done`/следующий кадр.
+* `capabilities` в `ready` — источник истины: если поля нет или оно `false`, соответствующую
+  возможность просто не используйте.
+* Ошибку `unsupported_frame` показывает сервер, когда он не понял **ваш** кадр; для своих
+  новых кадров это сигнал обновиться.
+
+## 8. Голос
 
 1. Запишите WAV: 16 кГц, моно, PCM 16 бит (так делает `react-native-live-audio-stream`;
    на iOS/Android то же самое даёт `AVAudioRecorder`/`MediaRecorder`).
@@ -56,12 +194,13 @@ connect() → отправляем hello{token, device} → ждём ready{sessi
    машине агента).
 
 Ограничения: аудио ≤ 8 МБ (примерно несколько минут речи), кадр целиком ≤ 16 МБ. Для длинных
-записей отправляйте несколько сообщений.
+записей отправляйте несколько сообщений. Голосовое от агента приходит кадром `media` с
+`kind: "voice"` — сохраните и проиграйте его.
 
 Озвучка ответа — на стороне приложения (TTS устройства) или аватара: SDK отдаёт текст,
 дальше решаете вы.
 
-## 5. Аватар
+## 9. Аватар
 
 Аватар — обычная HTML-страница в WebView, которая реализует контракт:
 
@@ -83,9 +222,10 @@ URL страницы приходит в кадре `ready` (`avatar_url`) — �
 webView.injectJavaScript(`window.hermesAvatar.setState('speaking'); true;`);
 ```
 
-## 6. Скетчи для разных платформ
+## 10. Скетчи для разных платформ
 
-Общая часть везде одна: WebSocket + JSON. Ниже — минимальный «скелет» подключения.
+Общая часть везде одна: WebSocket + JSON. Ниже — минимальный «скелет» подключения, а затем
+обработка новых кадров (`prompt`, `media`, `edit`, `typing.stop`).
 
 **Kotlin (Android, OkHttp)**
 
@@ -97,16 +237,27 @@ val ws = OkHttpClient().newWebSocket(
       webSocket?.send("""{"t":"hello","token":"$token","device":{"id":"android-1","name":"Телефон","platform":"android"}}""")
     }
     override fun onMessage(webSocket: WebSocket?, text: String) {
-      val frame = JSONObject(text)
-      when (frame.getString("t")) {
-        "ready" -> session = frame.getString("session")
-        "message" -> append(frame.getString("text"), frame.getBoolean("final"))
-        "avatar" -> avatarState = frame.getString("state")
+      val f = JSONObject(text)
+      when (f.getString("t")) {
+        "ready" -> session = f.getString("session")
+        "message" -> if (f.optBoolean("edit")) editMessage(f.getString("id"), f.getString("text"))
+                     else append(f.getString("id"), f.getString("text"), f.getBoolean("final"))
+        "avatar" -> avatarState = f.getString("state")
       }
     }
     override fun onClosing(code: Int, reason: String?) { if (code == 1008) showNoAccess() }
   }
 )
+```
+
+Новые кадры в том же `onMessage` (Kotlin):
+
+```kotlin
+"prompt" -> showButtons(f.getString("id"), f.getJSONArray("options"))
+"media"  -> saveMedia(f.getString("id"), f.getString("kind"), f.optString("filename"),
+                      f.optString("data"), f.getBoolean("final"))
+"typing" -> if (f.optBoolean("stop")) hideTyping() else showTyping()
+// ответ на карточку: ws.send("""{"t":"prompt","prompt_id":"$pid","option_id":"$opt"}""")
 ```
 
 **Swift (iOS, URLSessionWebSocketTask)**
@@ -118,31 +269,62 @@ task.send(.string(#"{"t":"hello","token":"\#(token)","device":{"id":"ios-1","nam
 // далее task.receive { ... } в цикле, разбор JSON по полю "t"
 ```
 
+Обработка новых кадров (Swift):
+
+```swift
+func onFrame(_ raw: String) {
+  guard let f = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+        let t = f["t"] as? String else { return }
+  switch t {
+  case "message": (f["edit"] as? Bool) == true
+      ? editMessage(f["id"] as? String, text: f["text"] as? String)
+      : append(f["id"] as? String, text: f["text"] as? String, final: f["final"] as? Bool ?? false)
+  case "prompt": showButtons(id: f["id"] as? String, options: f["options"] as? [[String: Any]] ?? [])
+  case "media":  onMedia(f)   // собрать по id, сохранить на final (см. раздел «Медиа»)
+  case "typing": (f["stop"] as? Bool) == true ? hideTyping() : showTyping()
+  default: break
+  }
+}
+// ответ на карточку:
+// task.send(.string(#"{"t":"prompt","prompt_id":"\#(pid)","option_id":"\#(opt)"}"#))
+```
+
 **Dart / Flutter (web_socket_channel)**
 
 ```dart
 final channel = WebSocketChannel.connect(Uri.parse('$wsUrl?token=$token'));
 channel.sink.add(jsonEncode({'t': 'hello', 'token': token, 'device': {'id': 'flutter-1', 'name': 'Телефон'}}));
 channel.stream.listen((raw) {
-  final frame = jsonDecode(raw as String) as Map<String, dynamic>;
-  if (frame['t'] == 'message') addMessage(frame['text'] as String, frame['final'] as bool);
+  final f = jsonDecode(raw as String) as Map<String, dynamic>;
+  switch (f['t']) {
+    case 'message':
+      f['edit'] == true ? editMessage(f['id'], f['text']) : addMessage(f['id'], f['text'], f['final']);
+    case 'prompt':
+      showButtons(f['id'], (f['options'] as List).cast<Map>());
+    case 'typing':
+      f['stop'] == true ? hideTyping() : showTyping();
+  }
 });
+// ответ на карточку: channel.sink.add(jsonEncode({'t': 'prompt', 'prompt_id': pid, 'option_id': opt}));
+// медиа от агента: собрать data по id, сохранить при final == true (см. раздел «Медиа»)
 ```
 
-## 7. Диагностика
+## 11. Диагностика
 
 | Симптом | Причина |
 |---|---|
-| `auth_failed` / закрытие 1008 | токен не совпадает с `MOBILE_TOKEN`, либо `device.id` отсутствует в `MOBILE_ALLOWED_USERS` |
+| `auth_failed` / закрытие 1008 | токен не совпадает с `MOBILE_TOKEN`, либо `device.id` отсутствует в `MOBILE_ALLOWED_USERS` (и не задано `MOBILE_ALLOW_ALL_USERS=1`) |
 | `ready` приходит, ответов нет | устройство ещё не одобрено: `hermes pairing list` → `approve`; на первом контакте агент отвечает pairing-кодом |
 | Ответ «No home channel is set» | штатное напоминание Hermes: отправьте `/sethome`, чтобы этот чат стал домашним (туда уходят cron-сообщения) |
 | `device_offline` в cron-доставке | приложение не подключено: мобильная доставка требует живого соединения |
+| `too_big` при медиа | файл больше 8 МБ или кадр больше 16 МБ — шлите кусками (`part`/`parts`) или сожмите |
+| ответ на карточку «проглочен» | карточка истекла (`prompt_done{expired:true}`) или `prompt_id` не тот |
 | «кадр не пришёл» при подключении извне | порт адаптера не открыт наружу или не проксируется через Caddy — см. `docs/adapter-install.md` |
 
 Проверить руками: `wscat -c "ws://<хост>:8787/ws?token=<токен>"`, затем отправить
 `{"t":"hello","device":{"id":"cli"}}`.
 
-## 8. Безопасность
+## 12. Безопасность
 
 * Токен — единственный секрет приложения: храните его в Keychain/Keystore, не в открытом
   коде и не в логи.
@@ -150,5 +332,7 @@ channel.stream.listen((raw) {
   через `adb reverse tcp:8787 tcp:8787` при разработке.
 * Одно приложение — один токен (`MOBILE_EXTRA_TOKENS` позволяет их различить). Отзыв токена
   = убрать его из `.env` и перезапустить шлюз.
-* Полезная нагрузка — часть диалога с агентом: не отправляйте через протокол данные, которые
-  агент не должен видеть.
+* Ответ на карточку-вопрос валидируется на сервере: недопустимый `option_id` превращается в
+  безопасное значение (`deny`/`cancel`), «подделать» одобрение командой клиента нельзя.
+* Полезная нагрузка (текст, медиа) — часть диалога с агентом: не отправляйте через протокол
+  данные, которые агент не должен видеть.

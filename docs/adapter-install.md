@@ -34,8 +34,26 @@ printf 'MOBILE_HOST=0.0.0.0\nMOBILE_PORT=8787\nMOBILE_PATH=/ws\n' >> ~/.hermes/.
 | `MOBILE_HOST` / `MOBILE_PORT` / `MOBILE_PATH` | где слушает адаптер (по умолчанию `0.0.0.0:8787/ws`) |
 | `MOBILE_AVATAR_URL` | HTML-страница аватара, которую открывает приложение (приходит в кадре `ready`) |
 | `MOBILE_ALLOWED_USERS` | список `device.id` через запятую (пусто — любое устройство с валидным токеном) |
+| `MOBILE_ALLOW_ALL_USERS` | `1`/`true` — принимать любое устройство с валидным токеном, не сверяя с белым списком (удобно для быстрой проверки и разработки; в проде лучше `MOBILE_ALLOWED_USERS`) |
 | `MOBILE_EXTRA_TOKENS` | дополнительные токены — если приложений/разработчиков несколько |
 | `MOBILE_HOME_DEVICE` | устройство по умолчанию для доставки cron (`deliver=mobile`) |
+
+Те же параметры можно задать без `.env` — в `~/.hermes/config.yaml` в блоке
+`gateway.platforms.mobile.extra` (ключи без префикса `MOBILE_`: `host`, `port`, `path`,
+`avatar_url`, `allowed_users`, `extra_tokens`, `home_device`). Приоритет у переменных
+окружения: если в `.env` значение задано, оно перекрывает `config.yaml`.
+
+```yaml
+gateway:
+  platforms:
+    mobile:
+      enabled: true
+      extra:
+        host: 0.0.0.0
+        port: 8787
+        avatar_url: https://agent.example.com/avatar/
+        allowed_users: [ "tel-1", "tablet-2" ]
+```
 
 Интерактивно: `hermes gateway setup` → **Hermes Go Mobile** (мастер сгенерирует токен).
 
@@ -124,3 +142,53 @@ hermes gateway restart
 | `ready` есть, ответов нет | устройство не одобрено (`hermes pairing approve mobile …`) |
 | плагин не виден в `hermes plugins list` | проверьте путь `~/.hermes/plugins/<name>/plugin.yaml` и `plugins.enabled` в `config.yaml` |
 | `websockets` не установлен | адаптер поставит его сам при подключении (`ensure_deps_fn`); вручную: `pip install websockets>=12` |
+
+## 9. Проверка карточек и медиа руками
+
+Подключитесь `wscat`-ом (или python-скриптом из §3) и пройдите сценарии ниже. Токен
+подставляйте свой, в примерах кадров он не показан.
+
+**1) Убедиться, что возможности объявлены.** В ответ на `hello` сервер шлёт `ready`; в
+`capabilities` должны быть новые поля:
+
+```json
+{"t":"ready","v":1,"session":"mobile:cli-1","capabilities":{"text":true,"voice":true,"typing":true,"avatar_states":["idle","thinking","speaking"],"media_in":["image","video","document","audio"],"media_out":["image","voice","video","document","animation"],"prompts":["exec_approval","slash_confirm","clarify"],"edit":true,"max_media_bytes":8388608,"max_text_chars":12000}}
+```
+
+**2) Отправить медиа агенту.** Небольшой файл — одним кадром (`part`/`parts` можно не
+указывать, тогда это `parts:1`):
+
+```json
+{"t":"media","id":"m1","kind":"image","mime":"image/png","filename":"test.png","caption":"проверка","data":"iVBORw0KGgoAAAANSUhEUg…"}
+```
+
+Агент получит фото с подписью. Файл больше 8 МБ шлите кусками: `{"...","part":0,"parts":2,...}`
+и `{"...","part":1,"parts":2,...}` с одним и тем же `id`.
+
+**3) Дождаться карточки.** Попросите агента выполнить что-то опасное (или уточнить запрос) —
+придёт кадр `prompt`:
+
+```json
+{"t":"prompt","id":"5f6a…","kind":"exec_approval","text":"Опасная команда rm -rf …","options":[{"id":"once","label":"✅ Одобрить один раз","style":"primary"},{"id":"deny","label":"❌ Отклонить","style":"danger"}],"session":"mobile:cli-1","timeout_seconds":300}
+```
+
+**4) Ответить одним кадром.** `option_id` — из `options`. Ответ не уходит в чат, а резолвит
+запрос; сервер подтверждает кадром `prompt_done`:
+
+```
+→ {"t":"prompt","prompt_id":"5f6a…","option_id":"deny"}
+← {"t":"prompt_done","id":"5f6a…","option_id":"deny"}
+```
+
+Недопустимый `option_id` (например `"whatever"`) сервер заменит на безопасный (`deny` для
+одобрения, `cancel` для подтверждения) — это видно по `option_id` в `prompt_done`. Если
+ничего не отвечать, через `timeout_seconds` придёт `{"t":"prompt_done","id":"5f6a…","expired":true}`.
+
+**5) Принять медиа от агента.** Если агент пришлёт картинку/файл, придёт кадр `media` с
+кусками и `final`:
+
+```json
+{"t":"media","id":"a1","kind":"image","mime":"image/png","filename":"chart.png","caption":"График","part":0,"parts":1,"final":true,"size":20480,"data":"iVBORw0KGgo…"}
+```
+
+Соберите `data` по `id` и сохраните файл, когда пришёл `final:true`.

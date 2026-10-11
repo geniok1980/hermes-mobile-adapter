@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hermes Mobile Adapter — проверка в браузере</title>
 <style>
-  :root { color-scheme: dark; --bg:#0b0b0f; --surface:#14141b; --border:#262633; --text:#f2f4f8; --muted:#9ba3b4; --accent:#5b8def; }
+  :root { color-scheme: dark; --bg:#0b0b0f; --surface:#14141b; --border:#262633; --text:#f2f4f8; --muted:#9ba3b4; --accent:#5b8def; --danger:#e5484d; }
   * { box-sizing: border-box; }
   body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.5 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; display:flex; justify-content:center; }
   .app { width:100%; max-width:720px; padding:20px; display:flex; flex-direction:column; gap:14px; }
@@ -15,6 +15,7 @@
   input { flex:1; min-width:180px; }
   button { cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { border-color:var(--danger); color:#ff9ea0; }
   #status { color:var(--muted); font-size:13px; }
   #avatar { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }
   .dot { width:10px; height:10px; border-radius:50%; background:#3a3a4a; transition:background .2s; }
@@ -24,6 +25,12 @@
   .me { align-self:flex-end; background:rgba(91,141,239,.16); border:1px solid var(--accent); }
   .agent { align-self:flex-start; background:#1c1c25; }
   .sys { align-self:center; color:var(--muted); font-size:12px; }
+  .card { align-self:flex-start; background:#161620; border:1px solid var(--accent); border-radius:12px; padding:12px; max-width:92%; display:flex; flex-direction:column; gap:8px; }
+  .card .kind { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .card .opts { display:flex; gap:8px; flex-wrap:wrap; }
+  .card.resolved { opacity:.55; border-color:var(--border); }
+  .media img, .media video { max-width:100%; border-radius:10px; display:block; }
+  .media .file { color:var(--accent); }
   code { background:#1c1c25; padding:1px 5px; border-radius:5px; }
   details { color:var(--muted); font-size:13px; }
 </style>
@@ -47,15 +54,19 @@
   <div class="row">
     <input id="text" placeholder="Сообщение агенту…" />
     <button class="primary" id="send">Отправить</button>
+    <input id="file" type="file" style="display:none" />
+    <button id="attach" title="Отправить фото или файл">📎</button>
     <button id="home">/sethome</button>
   </div>
 
   <details>
     <summary>Что происходит под капотом</summary>
     Эта страница — эталонная реализация протокола на голом JS: <code>hello</code> → <code>ready</code>,
-    затем <code>text</code> вверх и <code>message</code>/<code>typing</code>/<code>avatar</code>/<code>error</code> вниз.
-    Никакой библиотеки: любой рантайм с WebSocket (Swift, Kotlin, Dart, RN) делает ровно это же.
-    Типы и готовый клиент — в <code>sdk/typescript/hermesClient.ts</code>.
+    затем <code>text</code>/<code>audio</code>/<code>media</code>/<code>prompt</code> вверх и
+    <code>message</code> (с <code>edit</code> при стриминге), <code>typing</code> (с <code>stop</code>),
+    <code>avatar</code>, <code>media</code>, <code>prompt</code>/<code>prompt_done</code>,
+    <code>error</code> вниз. Никакой библиотеки: любой рантайм с WebSocket (Swift, Kotlin, Dart, RN)
+    делает ровно это же. Типы и готовый клиент — в <code>sdk/typescript/hermesClient.ts</code>.
   </details>
 </div>
 
@@ -64,6 +75,7 @@
   const el = (id) => document.getElementById(id);
   let socket = null;
   const PROTOCOL_VERSION = 1;
+  const MEDIA_CHUNK_BYTES = 3 * 1024 * 1024;
 
   const log = (text, cls = 'agent') => {
     const div = document.createElement('div');
@@ -81,6 +93,119 @@
   };
 
   const frame = (obj) => JSON.stringify(obj);
+  const send = (obj) => {
+    if (!socket || socket.readyState !== 1) { status('Сначала подключитесь'); return false; }
+    socket.send(frame(obj));
+    return true;
+  };
+
+  // ── медиа от агента: картинка/ссылка/файл ─────────────────────────────────
+  const showMedia = (data) => {
+    const box = document.createElement('div');
+    box.className = 'msg agent media';
+    const src = data.data ? `data:${data.mime || 'application/octet-stream'};base64,${data.data}` : data.url;
+    if (data.kind === 'image' || (data.mime || '').startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = data.filename || 'изображение';
+      box.appendChild(img);
+    } else if (data.kind === 'video' || (data.mime || '').startsWith('video/')) {
+      const video = document.createElement('video');
+      video.src = src;
+      video.controls = true;
+      box.appendChild(video);
+    } else if (data.kind === 'voice' || (data.mime || '').startsWith('audio/')) {
+      const audio = document.createElement('audio');
+      audio.src = src;
+      audio.controls = true;
+      box.appendChild(audio);
+    } else {
+      const link = document.createElement('a');
+      link.className = 'file';
+      link.href = src;
+      link.download = data.filename || 'файл';
+      link.textContent = `📄 ${data.filename || 'файл'}`;
+      box.appendChild(link);
+    }
+    const caption = [data.caption, data.filename].filter(Boolean).join(' · ');
+    if (caption) {
+      const note = document.createElement('div');
+      note.className = 'sys';
+      note.textContent = caption;
+      box.appendChild(note);
+    }
+    el('log').appendChild(box);
+    el('log').scrollTop = el('log').scrollHeight;
+  };
+
+  // ── карточка-вопрос: кнопки вариантов ─────────────────────────────────────
+  const showPrompt = (data) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.prompt = data.id;
+    const kind = document.createElement('div');
+    kind.className = 'kind';
+    kind.textContent = `${data.kind} · ответьте кнопкой${data.timeout_seconds ? ` (до ${data.timeout_seconds} c)` : ''}`;
+    card.appendChild(kind);
+    const text = document.createElement('div');
+    text.textContent = data.text;
+    card.appendChild(text);
+    const opts = document.createElement('div');
+    opts.className = 'opts';
+    (data.options || []).forEach((option) => {
+      const button = document.createElement('button');
+      button.textContent = option.label || option.id;
+      if (option.style === 'danger') button.className = 'danger';
+      if (option.style === 'primary') button.className = 'primary';
+      button.addEventListener('click', () => {
+        if (option.id === 'other') {
+          const answer = window.prompt('Свой ответ:') || '';
+          if (!answer.trim()) return;
+          send({ t: 'prompt', prompt_id: data.id, option_id: 'other', text: answer });
+        } else {
+          send({ t: 'prompt', prompt_id: data.id, option_id: option.id });
+        }
+        finishPrompt(data.id, option.id);
+      });
+      opts.appendChild(button);
+    });
+    card.appendChild(opts);
+    el('log').appendChild(card);
+    el('log').scrollTop = el('log').scrollHeight;
+  };
+
+  const finishPrompt = (id, optionId) => {
+    const card = document.querySelector(`[data-prompt="${id}"]`);
+    if (!card) return;
+    card.classList.add('resolved');
+    const note = document.createElement('div');
+    note.className = 'sys';
+    note.textContent = optionId ? `выбрано: ${optionId}` : 'карточка закрыта';
+    card.appendChild(note);
+  };
+
+  // ── отправка медиа вверх (файл → base64, нарезка по 3 МБ) ─────────────────
+  const sendMediaFile = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = String(reader.result).split(',')[1] || '';
+      const raw = atob(base64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      const kind = file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : 'document';
+      const id = `m-${Date.now().toString(36)}`;
+      const parts = Math.max(1, Math.ceil(bytes.length / MEDIA_CHUNK_BYTES));
+      for (let index = 0; index < parts; index++) {
+        const chunk = bytes.slice(index * MEDIA_CHUNK_BYTES, (index + 1) * MEDIA_CHUNK_BYTES);
+        let binary = '';
+        for (let i = 0; i < chunk.length; i++) binary += String.fromCharCode(chunk[i]);
+        send({ t: 'media', id, kind, mime: file.type || 'application/octet-stream', filename: file.name,
+               data: btoa(binary), part: index, parts });
+      }
+      log(`📎 отправлено: ${file.name} (${kind}, ${parts} часть(ей))`, 'me');
+    };
+    reader.readAsDataURL(file);
+  };
 
   function handle(raw) {
     let data;
@@ -89,9 +214,10 @@
       case 'ready':
         status(`Подключено. Сессия: ${data.session}${data.v !== PROTOCOL_VERSION ? ` (шлюз v${data.v})` : ''}`);
         log(`Подключено как ${data.session}`, 'sys');
+        if (data.capabilities && data.capabilities.edit) log('шлюз поддерживает стриминг (edit)', 'sys');
         break;
       case 'typing':
-        setAvatar('thinking');
+        if (data.stop) { setAvatar('idle'); } else { setAvatar('thinking'); }
         break;
       case 'avatar':
         setAvatar(data.state);
@@ -99,11 +225,29 @@
       case 'message': {
         const key = data.id;
         const existing = document.querySelector(`[data-msg="${key}"]`);
-        if (existing) { existing.textContent += data.text; }
-        else { const node = log(data.text); node.dataset.msg = key; }
+        if (data.edit) {
+          // Правка уже показанного сообщения — заменяем текст (стриминг).
+          if (existing) { existing.textContent = data.text; }
+          else { const node = log(data.text); node.dataset.msg = key; }
+        } else if (existing) {
+          existing.textContent += data.text;
+        } else {
+          const node = log(data.text); node.dataset.msg = key;
+        }
         el('log').scrollTop = el('log').scrollHeight;
         break;
       }
+      case 'prompt':
+        showPrompt(data);
+        break;
+      case 'prompt_done':
+        finishPrompt(data.id, data.expired ? null : data.option_id);
+        break;
+      case 'media':
+        // Многочастные файлы адаптер шлёт кусками — ждём последний (final).
+        if (data.parts > 1 && !data.final) break;
+        showMedia(data);
+        break;
       case 'error':
         status(`Ошибка ${data.code}: ${data.message}`);
         log(`⚠️ ${data.code}: ${data.message}`, 'sys');
@@ -126,17 +270,18 @@
     socket.onclose = (event) => status(event.code === 1008 ? 'Доступ запрещён: неверный токен (код 1008)' : `Соединение закрыто (${event.code})`);
   });
 
-  const send = (text) => {
-    if (!socket || socket.readyState !== 1) { status('Сначала подключитесь'); return; }
+  const sendText = (text) => {
     const value = text.trim();
     if (!value) return;
-    socket.send(frame({ t: 'text', id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, text: value }));
+    if (!send({ t: 'text', id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, text: value })) return;
     log(value, 'me');
   };
 
-  el('send').addEventListener('click', () => { send(el('text').value); el('text').value = ''; });
-  el('text').addEventListener('keydown', (e) => { if (e.key === 'Enter') { send(el('text').value); el('text').value = ''; } });
-  el('home').addEventListener('click', () => send('/sethome'));
+  el('send').addEventListener('click', () => { sendText(el('text').value); el('text').value = ''; });
+  el('text').addEventListener('keydown', (e) => { if (e.key === 'Enter') { sendText(el('text').value); el('text').value = ''; } });
+  el('home').addEventListener('click', () => sendText('/sethome'));
+  el('attach').addEventListener('click', () => el('file').click());
+  el('file').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) sendMediaFile(f); e.target.value = ''; });
 })();
 </script>
 </body>
