@@ -38,7 +38,7 @@
 | 3 | `adapter_factory` | `PlatformConfig -> adapter` | — (обяз.) | ✅ лямбда |
 | 4 | `check_fn` | ПАССИВНАЯ проверка зависимостей (никогда не ставит) | — (обяз.) | ✅ `check_requirements` |
 | 5 | `validate_config` | хватает ли настроек | `None` («пусть `connect()` упадёт понятно») | ✅ `validate_config` |
-| 6 | `ensure_deps_fn` | АКТИВНАЯ установка зависимостей | `None` = нет авто-установки, `check_fn=False` — жёсткий блок | ✅ `ensure_deps` |
+| 6 | `ensure_deps_fn` | АКТИВНАЯ установка зависимостей | `None` = нет авто-установки, `check_fn=False` — жёсткий блок | ❌ (зависимостей не ставим: `websockets` входит в Hermes; `check_fn` только проверяет) |
 | 7 | `is_connected` | «подключено ли» для `gateway status` / setup-UI | `None` → фоллбэк на `validate_config`/`check_fn` | ❌ (фоллбэк ок) |
 | 8 | `required_env` | показ в `hermes setup` | `[]` | ✅ `["MOBILE_TOKEN"]` |
 | 9 | `install_hint` | текст, когда `check_fn` ложно | `""` | ✅ |

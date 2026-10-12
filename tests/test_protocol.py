@@ -115,7 +115,7 @@ class TestTokens(unittest.TestCase):
         masked = proto.redact_token(secret)
         self.assertNotIn(secret, masked)
         self.assertTrue(masked.startswith("0123"))
-        self.assertEqual(proto.redact_token(""), "<пусто>")
+        self.assertEqual(proto.redact_token(""), "<empty>")
         self.assertEqual(proto.redact_token("short"), "***")
 
 

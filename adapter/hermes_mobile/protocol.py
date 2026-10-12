@@ -80,6 +80,7 @@ INBOUND_MEDIA_KINDS = ("image", "video", "document", "audio")
 OUTBOUND_MEDIA_KINDS = ("image", "voice", "video", "document", "animation")
 MAX_MEDIA_BYTES = 8 * 1024 * 1024     # один файл (base64 ≈ 10.7 МБ — влезает в кадр)
 MEDIA_CHUNK_BYTES = 3 * 1024 * 1024   # размер куска при передаче больших файлов
+MIN_MEDIA_CHUNK_BYTES = 4 * 1024       # разумный минимум: ограничивает число частей (память)
 DEFAULT_PROMPT_TTL = 300.0            # столько же, сколько ждёт текстовый фолбэк Hermes
 
 # Коды ошибок протокола (стабильные — клиент показывает их пользователю).
@@ -87,6 +88,7 @@ DEFAULT_PROMPT_TTL = 300.0            # столько же, сколько жд
 # (первый кадр не hello → E_BAD_FRAME + закрытие 1008; внутренние сбои закрывают соединение).
 E_AUTH_REQUIRED = "auth_required"
 E_AUTH_FAILED = "auth_failed"
+E_FORBIDDEN = "forbidden"   # действие запрещено этому соединению (чужой device id, deliver не от cron)
 E_BAD_FRAME = "bad_frame"
 E_UNSUPPORTED = "unsupported_frame"
 E_TOO_BIG = "too_big"
@@ -120,15 +122,15 @@ def loads(raw: Any) -> Dict[str, Any]:
         try:
             raw = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ProtocolError(E_BAD_FRAME, "Кадр не является корректным UTF-8", fatal=True) from exc
+            raise ProtocolError(E_BAD_FRAME, "Frame is not valid UTF-8", fatal=True) from exc
     if len(raw) > MAX_FRAME_BYTES:
-        raise ProtocolError(E_TOO_BIG, "Кадр слишком большой", fatal=True)
+        raise ProtocolError(E_TOO_BIG, "Frame is too large", fatal=True)
     try:
         data = json.loads(raw)
     except (ValueError, TypeError) as exc:
-        raise ProtocolError(E_BAD_FRAME, "Кадр не является корректным JSON") from exc
+        raise ProtocolError(E_BAD_FRAME, "Frame is not valid JSON") from exc
     if not isinstance(data, dict):
-        raise ProtocolError(E_BAD_FRAME, "Кадр должен быть JSON-объектом")
+        raise ProtocolError(E_BAD_FRAME, "Frame must be a JSON object")
     return data
 
 
@@ -152,13 +154,13 @@ def require_text(frame: Dict[str, Any]) -> str:
     """Текст сообщения из кадра ``text``; пустой текст — ошибка протокола."""
     raw = frame.get("text")
     if raw is None:
-        raise ProtocolError(E_BAD_FRAME, "В кадре нет поля text")
+        raise ProtocolError(E_BAD_FRAME, "Frame has no text field")
     text = str(raw)
     if not text.strip():
-        raise ProtocolError(E_BAD_FRAME, "Пустое сообщение")
+        raise ProtocolError(E_BAD_FRAME, "Empty message")
     if len(text) > MAX_TEXT_CHARS:
         raise ProtocolError(
-            E_TOO_BIG, f"Сообщение длиннее {MAX_TEXT_CHARS} символов — разбейте его на части"
+            E_TOO_BIG, f"Message is longer than {MAX_TEXT_CHARS} characters — split it into parts"
         )
     return text
 
@@ -171,19 +173,19 @@ def require_audio(frame: Dict[str, Any]) -> Tuple[bytes, str]:
     """
     fmt = str(frame.get("format") or "").strip().lower()
     if fmt not in ("wav", "ogg"):
-        raise ProtocolError(E_UNSUPPORTED, "Поддерживаются только форматы wav и ogg")
+        raise ProtocolError(E_UNSUPPORTED, "Only wav and ogg formats are supported")
     data = frame.get("data")
     if not isinstance(data, str) or not data:
-        raise ProtocolError(E_BAD_FRAME, "В кадре audio нет поля data (base64)")
+        raise ProtocolError(E_BAD_FRAME, "audio frame has no data field (base64)")
     try:
         audio = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ProtocolError(E_BAD_FRAME, "Поле data не является корректным base64") from exc
+        raise ProtocolError(E_BAD_FRAME, "data field is not valid base64") from exc
     if not audio:
-        raise ProtocolError(E_BAD_FRAME, "Пустая аудиозапись")
+        raise ProtocolError(E_BAD_FRAME, "Empty audio")
     if len(audio) > MAX_AUDIO_BYTES:
         raise ProtocolError(
-            E_TOO_BIG, f"Аудио длиннее {MAX_AUDIO_BYTES // (1024 * 1024)} МБ — сократите запись"
+            E_TOO_BIG, f"Audio is longer than {MAX_AUDIO_BYTES // (1024 * 1024)} MB — shorten the recording"
         )
     return audio, fmt
 
@@ -244,7 +246,7 @@ def is_authorized(token: Optional[str], expected: Iterable[str]) -> bool:
 def redact_token(token: Optional[str]) -> str:
     """Маска токена для логов — сам токен в логи не попадает никогда."""
     if not token:
-        return "<пусто>"
+        return "<empty>"
     if len(token) <= 8:
         return "***"
     return f"{token[:4]}…{token[-2:]}"
@@ -266,7 +268,7 @@ def chunk_text(text: str, limit: int = DEFAULT_CHUNK_LIMIT) -> List[str]:
     жёсткий разрез. Никогда не возвращает пустых кусков; короткий текст — один кусок.
     """
     if limit <= 0:
-        raise ValueError("limit должен быть положительным")
+        raise ValueError("limit must be positive")
     payload = str(text or "")
     if not payload:
         return []
@@ -330,6 +332,22 @@ def split_bytes(payload: bytes, chunk_size: int = MEDIA_CHUNK_BYTES) -> List[byt
     return [payload[i: i + size] for i in range(0, len(payload), size)] or [b""]
 
 
+def split_token_bindings(raw: Any) -> Dict[str, str]:
+    """Разбирает ``MOBILE_EXTRA_TOKENS``: элемент ``token`` или ``device_id=token``.
+
+    Возвращает ``{token: device_id | ""}``. Привязка не даёт владельцу общего токена
+    занять чужой device id и перехватить чужую сессию, ответы и карточки одобрения.
+    """
+    bindings: Dict[str, str] = {}
+    for item in split_tokens(raw):
+        device_id, separator, token = item.partition("=")
+        if separator and token.strip():
+            bindings[token.strip()] = device_id.strip()
+        else:
+            bindings[item] = ""
+    return bindings
+
+
 def parse_media_upload(frame: Dict[str, Any]) -> Dict[str, Any]:
     """Разбирает кадр ``media`` от приложения.
 
@@ -340,29 +358,39 @@ def parse_media_upload(frame: Dict[str, Any]) -> Dict[str, Any]:
     if kind not in INBOUND_MEDIA_KINDS:
         raise ProtocolError(
             E_UNSUPPORTED,
-            f"Неподдерживаемый тип медиа {kind!r} (можно: {', '.join(INBOUND_MEDIA_KINDS)})",
+            f"Unsupported media kind {kind!r} (allowed: {', '.join(INBOUND_MEDIA_KINDS)})",
         )
     raw = frame.get("data")
     if not isinstance(raw, str) or not raw:
-        raise ProtocolError(E_BAD_FRAME, "В кадре media нет поля data (base64)")
+        raise ProtocolError(E_BAD_FRAME, "media frame has no data field (base64)")
     try:
         payload = base64.b64decode(raw, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ProtocolError(E_BAD_FRAME, "Поле data не является корректным base64") from exc
+        raise ProtocolError(E_BAD_FRAME, "data field is not valid base64") from exc
     if not payload:
-        raise ProtocolError(E_BAD_FRAME, "Пустой файл")
+        raise ProtocolError(E_BAD_FRAME, "Empty file")
 
     parts = _coerce_int(frame.get("parts"), 1)
     part = _coerce_int(frame.get("part"), 0)
     if parts < 1:
-        raise ProtocolError(E_BAD_FRAME, "parts должен быть ≥ 1")
+        raise ProtocolError(E_BAD_FRAME, "parts must be ≥ 1")
+    # Потолок числа частей: без него клиент заявляет parts=10^9 и держит буферы.
+    # Считаем от минимального куска (а не от 3 МБ): клиент вправе резать мельче
+    # максимального куска, иначе его отвергли бы на законной загрузке.
+    max_parts = -(-MAX_MEDIA_BYTES // MIN_MEDIA_CHUNK_BYTES)
+    if parts > max_parts:
+        raise ProtocolError(
+            E_BAD_FRAME,
+            f"parts={parts} exceeds the allowed maximum ({max_parts}) for a "
+            f"{MAX_MEDIA_BYTES // (1024 * 1024)} MB file",
+        )
     if not 0 <= part < parts:
-        raise ProtocolError(E_BAD_FRAME, f"part={part} вне диапазона parts={parts}")
+        raise ProtocolError(E_BAD_FRAME, f"part={part} is out of range for parts={parts}")
     if len(payload) > min(MEDIA_CHUNK_BYTES, MAX_MEDIA_BYTES) + 1024:
-        raise ProtocolError(E_TOO_BIG, "Кусок медиа больше допустимого — уменьшите размер кадра")
+        raise ProtocolError(E_TOO_BIG, "Media chunk is too large — reduce the frame size")
     if parts == 1 and len(payload) > MAX_MEDIA_BYTES:
         raise ProtocolError(
-            E_TOO_BIG, f"Файл больше {MAX_MEDIA_BYTES // (1024 * 1024)} МБ — шлите его кусками (part/parts)"
+            E_TOO_BIG, f"File exceeds {MAX_MEDIA_BYTES // (1024 * 1024)} MB — send it in parts (part/parts)"
         )
 
     mime = str(frame.get("mime") or "").strip() or guess_mime(frame.get("filename"))
@@ -382,11 +410,11 @@ def parse_prompt_response(frame: Dict[str, Any]) -> Dict[str, Any]:
     """Разбирает кадр-ответ на карточку: ``{prompt_id, option_id, text}``."""
     prompt_id = str(frame.get("prompt_id") or "").strip()
     if not prompt_id:
-        raise ProtocolError(E_BAD_FRAME, "В кадре prompt нет prompt_id")
+        raise ProtocolError(E_BAD_FRAME, "prompt frame has no prompt_id")
     option_id = str(frame.get("option_id") or "").strip().lower()
     text = str(frame.get("text") or "")
     if not option_id and not text.strip():
-        raise ProtocolError(E_BAD_FRAME, "В кадре prompt нет ни option_id, ни text")
+        raise ProtocolError(E_BAD_FRAME, "prompt frame has neither option_id nor text")
     return {"prompt_id": prompt_id[:128], "option_id": option_id[:64], "text": text}
 
 

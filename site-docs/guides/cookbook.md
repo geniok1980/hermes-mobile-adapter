@@ -57,7 +57,8 @@ onMedia: async (m) => {
 ```js
 case 'prompt': {
   // options: [{id:'once',label:'Одобрить один раз',style:'primary'}, {id:'deny',label:'Отклонить',style:'danger'}, ...]
-  showCard(data.id, data.text, data.options);
+  // для exec_approval: покажите data.command рядом с кнопками (data.description — пояснение)
+  showCard(data.id, data.text, data.command, data.description, data.options);
   break;
 }
 // при нажатии кнопки:
@@ -67,7 +68,8 @@ send({ t: 'prompt', prompt_id: promptId, option_id: 'once' });
 **Подводный камень:** ответ на карточку **не становится сообщением в чате** — не дублируйте
 выбор отдельным `text`. Значения строго по типу: `exec_approval` → `once|session|always|deny`;
 `slash_confirm` → `once|always|cancel`. Незнакомое сервер заменит на безопасное (`deny`/`cancel`),
-но и полагаться на это не стоит — шлите корректное.
+но и полагаться на это не стоит — шлите корректное. Карточку закрывает **только то устройство,
+которому она показана** (ответ с другого соединения → `forbidden`).
 
 ## 5. Обработать ответ на clarify текстом (`option id: other`)
 
@@ -147,7 +149,9 @@ case 'message':
 **Подводный камень:** cron-доставка требует **живого** соединения. Устройство офлайн — на
 машине агента вернётся `device_offline`. На клиенте ничего особенного не делайте: то же
 `message`. Кадр `delivered` (сервер→клиент `{t,id,device}`) — служебное подтверждение
-standalone-доставки, показывать его пользователю не нужно.
+standalone-доставки, показывать его пользователю не нужно. Кадр `deliver` — служебный и
+принимается только с loopback-адреса (cron на той же машине) или с токеном из
+`MOBILE_DELIVER_TOKENS`; обычное приложение его слать не должно — иначе получит `forbidden`.
 
 ## 10. Не сломаться на неизвестном кадре
 

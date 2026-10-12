@@ -2,54 +2,59 @@ name: hermes-mobile
 label: Mobile App (WebSocket)
 kind: platform
 version: 1.0.0
-requires_hermes: ">=0.21.3"
+requires_hermes: ">=0.21.6"
 description: >
-  Платформенный адаптер для мобильных приложений: поднимает WebSocket-сервер внутри
-  Hermes Agent, и приложение подключается к агенту напрямую — текст, голос, ответы агента
-  и события для аватара (thinking / speaking / idle). Зависимость — только `websockets`
-  (уже входит в окружение Hermes). Протокол: site-docs/protocol/index.md.
+  Platform adapter for mobile applications: it runs a WebSocket server inside
+  Hermes Agent and the app connects to the agent directly — text, voice, agent
+  replies and avatar events (thinking / speaking / idle). The only dependency is
+  `websockets` (already shipped with the Hermes environment). Protocol:
+  site-docs/protocol/index.md.
 author: HermesAI (geniok1980)
-# ``requires_env`` показывается в ``hermes config`` и в ``hermes gateway setup``.
+# ``requires_env`` is shown by ``hermes config`` and ``hermes gateway setup``.
 requires_env:
   - name: MOBILE_TOKEN
-    description: "Общий секрет приложения (авторизация WS-подключения)"
-    prompt: "Токен приложения (openssl rand -hex 32)"
+    description: "App shared secret (authorizes the WebSocket connection)"
+    prompt: "App token (openssl rand -hex 32)"
     password: true
-# ``optional_env`` — необязательные настройки со значениями по умолчанию.
+# ``optional_env`` — optional settings with defaults.
 optional_env:
   - name: MOBILE_HOST
-    description: "Адрес, на котором слушает адаптер (по умолчанию 0.0.0.0)"
-    prompt: "Host (0.0.0.0)"
+    description: "Listen address. Default is loopback (127.0.0.1); set 0.0.0.0 only deliberately, behind a wss:// reverse proxy."
+    prompt: "Host (127.0.0.1)"
     password: false
   - name: MOBILE_PORT
-    description: "Порт WebSocket-сервера адаптера (по умолчанию 8787)"
-    prompt: "Порт (8787)"
+    description: "WebSocket server port (default 8787)"
+    prompt: "Port (8787)"
     password: false
   - name: MOBILE_PATH
-    description: "Путь WebSocket-эндпоинта (по умолчанию /ws)"
-    prompt: "Путь (/ws)"
+    description: "WebSocket endpoint path (default /ws)"
+    prompt: "Path (/ws)"
     password: false
   - name: MOBILE_AVATAR_URL
-    description: "URL HTML-страницы аватара, которую открывает приложение"
-    prompt: "URL аватара"
+    description: "URL of the avatar HTML page the app opens"
+    prompt: "Avatar URL"
     password: false
   - name: MOBILE_HOME_DEVICE
-    description: "Устройство по умолчанию для доставки сообщений (cron → deliver=mobile)"
-    prompt: "ID устройства по умолчанию"
+    description: "Default device for delivery (cron → deliver=mobile)"
+    prompt: "Default device id"
     password: false
   - name: MOBILE_ALLOWED_USERS
-    description: "Список пользователей через запятую — проверяет сам Hermes (авторизация и pairing)"
-    prompt: "Разрешённые пользователи"
+    description: "Comma-separated user ids — enforced by Hermes itself (authorization and pairing)"
+    prompt: "Allowed users"
     password: false
   - name: MOBILE_ALLOWED_DEVICES
-    description: "Список ID устройств через запятую — дополнительный фильтр адаптера (пусто = любое устройство с валидным токеном)"
-    prompt: "Разрешённые устройства"
+    description: "Comma-separated device ids — an extra adapter-level filter (empty = any device with a valid token)"
+    prompt: "Allowed devices"
     password: false
   - name: MOBILE_ALLOW_ALL_USERS
-    description: "1/true — принимать любого пользователя с валидным токеном, не сверяя с белым списком (удобно для разработки; в проде лучше MOBILE_ALLOWED_USERS)"
-    prompt: "Разрешить всех пользователей? (1/0)"
+    description: "1/true — accept any user with a valid token without checking the allow list (handy for development; prefer MOBILE_ALLOWED_USERS in production)"
+    prompt: "Allow all users? (1/0)"
     password: false
   - name: MOBILE_EXTRA_TOKENS
-    description: "Дополнительные токены (pairing нескольких устройств), через запятую"
-    prompt: "Доп. токены"
+    description: "Additional tokens (pairing several devices), comma-separated. An entry may be `device_id=token` to bind a token to one device, so it cannot take over another device id."
+    prompt: "Extra tokens"
+    password: true
+  - name: MOBILE_DELIVER_TOKENS
+    description: "Comma-separated tokens allowed to send the service `deliver` frame (cron from another process or host). From a loopback address delivery is allowed without it."
+    prompt: "Deliver tokens"
     password: true

@@ -262,7 +262,7 @@
     const deviceId = el('device').value.trim() || 'web-demo';
     if (!token) { status('Укажите токен приложения'); return; }
     status('Подключаюсь…');
-    socket = new WebSocket(`${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`);
+    socket = new WebSocket(url);
 
     socket.onopen = () => socket.send(frame({ t: 'hello', v: PROTOCOL_VERSION, token, device: { id: deviceId, name: 'Браузер', platform: 'web', app_version: '1.0.0' } }));
     socket.onmessage = (event) => handle(String(event.data));

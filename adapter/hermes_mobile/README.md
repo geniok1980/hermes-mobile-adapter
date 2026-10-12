@@ -71,39 +71,65 @@ Optional:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MOBILE_HOST` | `0.0.0.0` | listen address |
+| `MOBILE_HOST` | `127.0.0.1` | listen address (loopback by default) |
 | `MOBILE_PORT` | `8787` | listen port |
 | `MOBILE_PATH` | `/ws` | WebSocket path |
 | `MOBILE_ALLOWED_USERS` | — | comma-separated user ids allowed to talk to the agent (Hermes authorization) |
 | `MOBILE_ALLOW_ALL_USERS` | — | `1` accepts any user with a valid token (development convenience) |
 | `MOBILE_ALLOWED_DEVICES` | — | comma-separated device ids — an extra adapter-level filter, separate from users |
-| `MOBILE_EXTRA_TOKENS` | — | additional tokens, for one token per device |
+| `MOBILE_EXTRA_TOKENS` | — | additional tokens, for one token per device. An entry may be `device_id=token` to bind a token to one device |
+| `MOBILE_DELIVER_TOKENS` | — | tokens allowed to send the service `deliver` frame (cron from another process or host) |
 | `MOBILE_HOME_DEVICE` | — | device id used for unattended (cron) delivery |
 | `MOBILE_AVATAR_URL` | — | avatar page URL handed to the app in `ready` |
+| `MOBILE_LOCALE` | `en` | language of strings the adapter itself forms (setup wizard, card buttons, client-facing errors). `en` or `ru`; anything else falls back to English |
 
 `hermes config` renders all of these (`hermes gateway setup` too).
 
+## Delivery model
+
+* **Token only in the `hello` frame.** The token is read from the first frame and nowhere else —
+  a `?token=` query parameter is *not* accepted, because query strings end up in reverse-proxy
+  and access logs. Send the token inside the `hello` frame over a `wss://` (TLS) connection.
+* **Loopback by default.** The adapter listens on `MOBILE_HOST`, which defaults to the loopback
+  address. Set `MOBILE_HOST` to the wildcard address only deliberately, and only behind a
+  `wss://` reverse proxy plus a firewall.
+* **Token ↔ device binding.** With `MOBILE_EXTRA_TOKENS`, an entry `device_id=token` binds that
+  token to one device id. A bound token cannot claim a different device id, and a device id that
+  is already connected can only be re-claimed by the same token — a shared token cannot hijack
+  another device's session, replies or approval cards.
+* **Service delivery.** The `deliver` frame (used by cron / `hermes send` from another process)
+  is accepted only from a loopback peer, or from a connection whose token is listed in
+  `MOBILE_DELIVER_TOKENS`. This lets a cron run on a different host deliver to the gateway
+  without opening `deliver` to every client.
+* **Bounded memory.** Per device at most 8 unfinished multipart uploads are tracked at once, and
+  their combined size is capped at 8 MB. Uploads are dropped when the device disconnects, so a
+  stalled or hostile client cannot pin gateway memory.
+
 ## Disclosure (what to know before installing)
 
-* **Network.** The plugin opens a listening WebSocket server on `MOBILE_HOST` / `MOBILE_PORT`
-  — the default host is the wildcard address (all interfaces) and the default port is 8787. Set
-  `MOBILE_HOST=127.0.0.1` unless remote devices must reach it, and put `wss://` (TLS) plus a
-  firewall in front when you expose it. Anyone who obtains the token can talk to the agent; use
-  `MOBILE_EXTRA_TOKENS` for a token per device and revoke by removing it.
+* **Network.** The plugin opens a listening WebSocket server on `MOBILE_HOST` / `MOBILE_PORT`.
+  The default host is the loopback address, and the default port is 8787. If remote devices must
+  reach the agent, set `MOBILE_HOST` to the wildcard address *and* put `wss://` (TLS) plus a
+  firewall in front. Anyone who obtains the token can talk to the agent; use
+  `MOBILE_EXTRA_TOKENS` for a token per device (optionally `device_id=token`) and revoke it by
+  removing the entry.
 * **Files on disk.** Inbound attachments (images, video, documents, voice) are written to
   `$HERMES_HOME/mobile-media`. Nothing is uploaded anywhere by the plugin.
 * **Credentials.** Secrets are read through Hermes's profile-scoped secret route
   (`get_scoped_secret`); the plugin does not parse `.env` files, does not read `auth.json`,
-  keychains or any other credential store, and never refreshes or writes tokens.
+  keychains or any other credential store, and never refreshes or writes tokens. The app token is
+  never placed in a URL, so it does not leak into proxy logs.
+* **No shell, no installs.** The plugin starts no shell commands and installs no dependencies;
+  `websockets` ships with the Hermes environment, so there is nothing extra to `pip install`.
 * **Approvals.** Command approvals keep going through Hermes: the adapter renders the approval
   card in the app and resolves it through Hermes's own resolver. Nothing is auto-approved, and
   unattended (cron) runs fail cleanly instead of hanging on a prompt.
-* **No telemetry**, no third-party network calls, no shell commands started by the plugin
-  itself, no self-updating code.
+* **No telemetry**, no third-party network calls, no self-updating code.
 
 ## Compatibility
 
-* `requires_hermes: ">=0.21.3"`.
+* `requires_hermes: ">=0.21.6"` (the `gateway.platforms._shared` helpers the adapter uses were
+  added in 0.21.6).
 * Dependency: `websockets` (already present in the Hermes environment). No extra pip installs.
 * Protocol v1 is stable; unknown frames are ignored by clients so new fields can be added
   without breaking older apps.

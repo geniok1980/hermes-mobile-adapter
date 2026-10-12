@@ -80,10 +80,13 @@ wscat -c "wss://hermes-go.com/mobile-ws"
 
 ```json
 {"t":"prompt","id":"<prompt_id>","kind":"exec_approval","text":"…rm -rf…",
+ "command":"rm -rf /tmp/build","description":"Удаляет временный каталог сборки",
  "options":[{"id":"once","label":"✅ Одобрить один раз","style":"primary"},
             {"id":"deny","label":"❌ Отклонить","style":"danger"}],
  "session":"mobile:qa-1","timeout_seconds":300}
 ```
+
+Проверьте поля `command`/`description`: приложение обязано показать точную команду рядом с кнопками.
 
 Ответьте кнопкой:
 
@@ -228,6 +231,10 @@ wscat -c "wss://hermes-go.com/mobile-ws"
 | аудио не wav/ogg | `{"t":"audio","format":"mp3",…}` | `error{code:"unsupported_frame"}` |
 | медиа-`kind` неверный | `{"t":"media","kind":"sticker",…}` | `error{code:"unsupported_frame"}` |
 | ответ на чужой `prompt_id` | `{"t":"prompt","prompt_id":"нет-такого","option_id":"once"}` | `prompt_done{expired:true}`, без ошибки |
+| ответ на карточку чужого устройства | подключиться под своим `device.id` и ответить на карточку, показанную другому устройству | `error{code:"forbidden"}` |
+| занятый `device.id` другим токеном | `MOBILE_EXTRA_TOKENS=qa-1=<токен>`; подключиться с другим токеном под `id:"qa-1"` | `error{code:"forbidden"}` + закрытие **1008** |
+| `deliver` не от cron | обычное (не loopback) соединение шлёт `{"t":"deliver","id":"x","target":"qa-1","text":"hi"}` | `error{code:"forbidden"}` |
+| медиа-загрузка сверх лимита памяти | заявить `parts` > 2048 либо держать открытыми > 8 серий / > 8 МиБ суммарно | `error{code:"bad_frame"}` (`parts`) / `too_big` (объём) |
 | cron-доставка офлайн | `hermes send --to <device.id> "текст"` при закрытом приложении | результат `device_offline` на машине агента |
 
 **Как читать отказы:** `fatal:true` в кадре `error` — соединение будет закрыто, повторять не

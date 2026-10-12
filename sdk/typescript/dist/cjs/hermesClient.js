@@ -150,9 +150,9 @@ class HermesClient {
     // ── внутреннее ────────────────────────────────────────────────────────────
     open() {
         this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
-        const separator = this.options.url.includes('?') ? '&' : '?';
-        const url = `${this.options.url}${separator}token=${encodeURIComponent(this.options.token)}`;
-        const socket = new WebSocket(url);
+        // Токен не уходит в URL: query-строки оседают в логах прокси и в истории браузера.
+        // Аутентификация — кадром hello (см. ниже).
+        const socket = new WebSocket(this.options.url);
         this.socket = socket;
         socket.onopen = () => {
             socket.send(JSON.stringify({

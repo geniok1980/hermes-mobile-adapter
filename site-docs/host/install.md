@@ -21,27 +21,39 @@ gateway:
       enabled: true
 ```
 
+Плагин требует Hermes **`>=0.21.6`** (`requires_hermes` в `plugin.yaml`) и **не устанавливает
+зависимости сам**: пакет `websockets` входит в окружение Hermes (если его нет — обновите Hermes).
+
 ## 2. Токен и параметры
 
 ```bash
 printf 'MOBILE_TOKEN=%s\n' "$(openssl rand -hex 32)" >> ~/.hermes/.env
-printf 'MOBILE_HOST=0.0.0.0\nMOBILE_PORT=8787\nMOBILE_PATH=/ws\n' >> ~/.hermes/.env
+printf 'MOBILE_HOST=127.0.0.1\nMOBILE_PORT=8787\nMOBILE_PATH=/ws\n' >> ~/.hermes/.env
 ```
 
 | Переменная | Назначение |
 |---|---|
 | `MOBILE_TOKEN` | обязательный общий секрет приложения (авторизация WS) |
-| `MOBILE_HOST` / `MOBILE_PORT` / `MOBILE_PATH` | где слушает адаптер (по умолчанию `0.0.0.0:8787/ws`) |
+| `MOBILE_HOST` / `MOBILE_PORT` / `MOBILE_PATH` | где слушает адаптер (**по умолчанию `127.0.0.1:8787/ws`** — loopback) |
 | `MOBILE_AVATAR_URL` | HTML-страница аватара, которую открывает приложение (приходит в кадре `ready`) |
 | `MOBILE_ALLOWED_USERS` | список пользователей через запятую — проверяет сам Hermes (авторизация, pairing) |
 | `MOBILE_ALLOWED_DEVICES` | список `device.id` через запятую — дополнительный фильтр адаптера (пусто — любое устройство с валидным токеном) |
 | `MOBILE_ALLOW_ALL_USERS` | `1`/`true` — принимать любое устройство с валидным токеном, не сверяя с белым списком (удобно для быстрой проверки и разработки; в проде лучше `MOBILE_ALLOWED_USERS`) |
-| `MOBILE_EXTRA_TOKENS` | дополнительные токены — если приложений/разработчиков несколько |
+| `MOBILE_EXTRA_TOKENS` | дополнительные токены — если приложений/разработчиков несколько. Элемент вида `device_id=token` **привязывает токен к устройству**: им нельзя занять чужой `device.id` |
+| `MOBILE_DELIVER_TOKENS` | список токенов, которым разрешён служебный кадр `deliver` (от cron) вне loopback |
 | `MOBILE_HOME_DEVICE` | устройство по умолчанию для доставки cron (`deliver=mobile`) |
+
+**Loopback по умолчанию.** Адаптер слушает `127.0.0.1:8787/ws` и доступен только с самой машины
+агента. Для удалённого доступа **осознанно** поставьте `MOBILE_HOST=0.0.0.0` и **обязательно**
+закройте его wss-прокси (TLS) и firewall — «как есть» наружу порт не выставляйте.
+
+**Служебная доставка (`deliver`).** Кадр `deliver` (cron → устройство) принимается только с
+loopback-адреса или от соединения с токеном из `MOBILE_DELIVER_TOKENS`; остальным — `forbidden`.
+Эта переменная нужна, когда cron-процесс подключается к шлюзу не по loopback.
 
 Те же параметры можно задать без `.env` — в `~/.hermes/config.yaml` в блоке
 `gateway.platforms.mobile.extra` (ключи без префикса `MOBILE_`: `host`, `port`, `path`,
-`avatar_url`, `allowed_users`, `extra_tokens`, `home_device`). Приоритет у переменных
+`avatar_url`, `allowed_users`, `extra_tokens`, `deliver_tokens`, `home_device`). Приоритет у переменных
 окружения: если в `.env` значение задано, оно перекрывает `config.yaml`.
 
 ```yaml
@@ -50,7 +62,7 @@ gateway:
     mobile:
       enabled: true
       extra:
-        host: 0.0.0.0
+        host: 127.0.0.1
         port: 8787
         avatar_url: https://agent.example.com/avatar/
         allowed_users: [ "tel-1", "tablet-2" ]
@@ -72,8 +84,8 @@ python - <<'PY'
 import asyncio, json, websockets
 async def main():
     token = "<MOBILE_TOKEN>"
-    async with websockets.connect(f"ws://127.0.0.1:8787/ws?token={token}") as ws:
-        await ws.send(json.dumps({"t": "hello", "device": {"id": "cli-1", "name": "Проверка"}}))
+    async with websockets.connect("ws://127.0.0.1:8787/ws") as ws:
+        await ws.send(json.dumps({"t": "hello", "token": token, "device": {"id": "cli-1", "name": "Проверка"}}))
         print("ready:", await ws.recv())
         await ws.send(json.dumps({"t": "text", "id": "t1", "text": "привет"}))
         for _ in range(10):
@@ -104,7 +116,8 @@ agent.example.com {
 }
 ```
 
-Проверка: `wscat -c "wss://agent.example.com/ws?token=<токен>"`.
+Проверка: `wscat -c "wss://agent.example.com/ws"` и первым кадром отправить
+`{"t":"hello","token":"<токен>"}` — токен в URL (`?token=`) не принимается.
 
 Если шлюз в контейнере — опубликуйте порт и не забудьте про firewall (обычно открываем
 наружу только 80/443, а адаптер проксируем). В нашем стенде это Caddy `rkdash-caddy` в сети
@@ -113,7 +126,8 @@ agent.example.com {
 ## 5. Несколько приложений
 
 * Разные команды/приложения — разные токены: `MOBILE_TOKEN` (первое) и
-  `MOBILE_EXTRA_TOKENS=tok2,tok3` (остальные). Каждому — свой `device.id`.
+  `MOBILE_EXTRA_TOKENS=tok2,tok3` (остальные). Каждому — свой `device.id`; можно привязать сразу:
+  `MOBILE_EXTRA_TOKENS=tel-1=tok2,tablet-2=tok3`.
 * Ограничить, какие устройства вообще подключаются: `MOBILE_ALLOWED_DEVICES=app-a,app-b`
   (кто из пользователей допущен — решает штатная авторизация Hermes: `MOBILE_ALLOWED_USERS`, pairing).
 * Сессии в Hermes разделяются по `device.id`, поэтому диалоги не смешиваются.
@@ -139,12 +153,12 @@ hermes gateway restart
 
 | Симптом | Решение |
 |---|---|
-| `bind_failed: не удалось занять 0.0.0.0:8787` | порт занят: `ss -ltnp \| grep 8787`, смените `MOBILE_PORT` |
+| `bind_failed: не удалось занять 127.0.0.1:8787` | порт занят: `ss -ltnp \| grep 8787`, смените `MOBILE_PORT` |
 | `config_missing: MOBILE_TOKEN не задан` | нет токена в `.env` профиля — платформа без токена не поднимается (это защита: адаптер не бывает «открытым») |
 | приложение получает `auth_failed` | токен в приложении ≠ `MOBILE_TOKEN`, либо устройство вне `MOBILE_ALLOWED_DEVICES`, либо пользователь не одобрен Hermes (`MOBILE_ALLOWED_USERS` / pairing) |
 | `ready` есть, ответов нет | устройство не одобрено (`hermes pairing approve mobile …`) |
 | плагин не виден в `hermes plugins list` | проверьте путь `~/.hermes/plugins/<name>/plugin.yaml` и `plugins.enabled` в `config.yaml` |
-| `websockets` не установлен | адаптер поставит его сам при подключении (`ensure_deps_fn`); вручную: `pip install websockets>=12` |
+| `websockets` не установлен | адаптер зависимостей **не ставит**: `websockets` входит в Hermes — обновите Hermes, если пакета нет |
 
 ## 9. Проверка карточек и медиа руками
 
@@ -172,8 +186,11 @@ hermes gateway restart
 придёт кадр `prompt`:
 
 ```json
-{"t":"prompt","id":"5f6a…","kind":"exec_approval","text":"Опасная команда rm -rf …","options":[{"id":"once","label":"✅ Одобрить один раз","style":"primary"},{"id":"deny","label":"❌ Отклонить","style":"danger"}],"session":"mobile:cli-1","timeout_seconds":300}
+{"t":"prompt","id":"5f6a…","kind":"exec_approval","text":"Опасная команда rm -rf …","command":"rm -rf /tmp/build","description":"Удаляет временный каталог сборки","options":[{"id":"once","label":"✅ Одобрить один раз","style":"primary"},{"id":"deny","label":"❌ Отклонить","style":"danger"}],"session":"mobile:cli-1","timeout_seconds":300}
 ```
+
+Покажите `command` рядом с кнопками — человек должен видеть, что именно одобряет. Карточку может
+закрыть только устройство, которому она показана: ответ с другого соединения получает `forbidden`.
 
 **4) Ответить одним кадром.** `option_id` — из `options`. Ответ не уходит в чат, а резолвит
 запрос; сервер подтверждает кадром `prompt_done`:

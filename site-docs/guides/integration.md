@@ -60,7 +60,8 @@ connect() → отправляем hello{token, device} → ждём ready{sessi
 Что делает приложение:
 
 1. Показывает `text` и кнопки из `options` (`label` — подпись, `style` — подсказка
-   оформления: `primary`/`danger`/пусто).
+   оформления: `primary`/`danger`/пусто). Для `exec_approval` сервер шлёт ещё поля **`command`**
+   (точная команда) и **`description`** — покажите команду рядом с кнопками.
 2. На нажатие отправляет **один кадр** `prompt` с `id` карточки и `option_id`:
 
 ```json
@@ -83,6 +84,8 @@ connect() → отправляем hello{token, device} → ждём ready{sessi
   в `prompt_done.option_id`.
 * Если карточка уже истекла/неизвестна, ответ не сломает соединение: придёт
   `prompt_done{expired:true}`.
+* Карточку может закрыть **только то устройство, которому она показана**: ответ с другого
+  соединения получает `error{code:"forbidden"}`.
 
 ## 5. Медиа
 
@@ -231,7 +234,7 @@ webView.injectJavaScript(`window.hermesAvatar.setState('speaking'); true;`);
 
 ```kotlin
 val ws = OkHttpClient().newWebSocket(
-  Request.Builder().url("$wsUrl?token=$token").build(),
+  Request.Builder().url(wsUrl).build(),
   object : WebSocketListener() {
     override fun onOpen(webSocket: WebSocket?, response: Response?) {
       webSocket?.send("""{"t":"hello","token":"$token","device":{"id":"android-1","name":"Телефон","platform":"android"}}""")
@@ -263,7 +266,7 @@ val ws = OkHttpClient().newWebSocket(
 **Swift (iOS, URLSessionWebSocketTask)**
 
 ```swift
-let task = URLSession.shared.webSocketTask(with: URL(string: "\(wsUrl)?token=\(token)")!)
+let task = URLSession.shared.webSocketTask(with: URL(string: wsUrl)!)
 task.resume()
 task.send(.string(#"{"t":"hello","token":"\#(token)","device":{"id":"ios-1","name":"iPhone","platform":"ios"}}"#))
 // далее task.receive { ... } в цикле, разбор JSON по полю "t"
@@ -292,7 +295,7 @@ func onFrame(_ raw: String) {
 **Dart / Flutter (web_socket_channel)**
 
 ```dart
-final channel = WebSocketChannel.connect(Uri.parse('$wsUrl?token=$token'));
+final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 channel.sink.add(jsonEncode({'t': 'hello', 'token': token, 'device': {'id': 'flutter-1', 'name': 'Телефон'}}));
 channel.stream.listen((raw) {
   final f = jsonDecode(raw as String) as Map<String, dynamic>;
@@ -318,11 +321,13 @@ channel.stream.listen((raw) {
 | Ответ «No home channel is set» | штатное напоминание Hermes: отправьте `/sethome`, чтобы этот чат стал домашним (туда уходят cron-сообщения) |
 | `device_offline` в cron-доставке | приложение не подключено: мобильная доставка требует живого соединения |
 | `too_big` при медиа | файл больше 8 МБ или кадр больше 16 МБ — шлите кусками (`part`/`parts`) или сожмите |
+| `too_big` / `bad_frame` при серии кусков | больше 8 незавершённых загрузок на устройство, суммарный буфер устройства > 8 МБ или `parts` > 2048: дождитесь завершения загрузок, не режьте мельче 4 КиБ на кусок (буферы освобождаются при отключении) |
+| `forbidden` | чужой `device.id` (токен привязан к другому устройству), ответ на карточку чужого устройства или `deliver` не от cron: подключайтесь под своим `device.id`, `deliver` шлёт cron (loopback) или токен из `MOBILE_DELIVER_TOKENS` |
 | ответ на карточку «проглочен» | карточка истекла (`prompt_done{expired:true}`) или `prompt_id` не тот |
 | «кадр не пришёл» при подключении извне | порт адаптера не открыт наружу или не проксируется через Caddy — см. `../../host/install.md` |
 
-Проверить руками: `wscat -c "ws://<хост>:8787/ws?token=<токен>"`, затем отправить
-`{"t":"hello","device":{"id":"cli"}}`.
+Проверить руками: `wscat -c "ws://127.0.0.1:8787/ws"`, затем первым кадром отправить
+`{"t":"hello","token":"<токен>","device":{"id":"cli"}}` (токен в URL `?token=` не принимается).
 
 ## 12. Безопасность
 

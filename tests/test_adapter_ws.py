@@ -151,7 +151,7 @@ class TestRegistration(BaseWS):
         self.assertTrue(callable(self.captured["standalone_sender_fn"]))
         self.assertTrue(callable(self.captured["env_enablement_fn"]))
         self.assertIsInstance(self.captured["adapter_factory"](self.config), mobile_adapter.HermesMobileAdapter)
-        self.assertIn("мобильном", self.captured["platform_hint"])
+        self.assertIn("language", self.captured["platform_hint"].lower())
 
     async def test_platform_enum_resolves(self):
         self.assertEqual(str(mobile_adapter.Platform("mobile").value), "mobile")
@@ -188,13 +188,17 @@ class TestConnectAndAuth(BaseWS):
                 await asyncio.wait_for(websocket.recv(), timeout=5)
             self.assertEqual(ctx.exception.rcvd.code, mobile_adapter.CLOSE_UNAUTHORIZED)
 
-    async def test_token_from_query_string_is_accepted(self):
+    async def test_token_in_query_string_is_rejected(self):
+        """Токен в URL не принимается: query-строки попадают в логи прокси."""
         await self.adapter.connect()
         async with websockets.connect(self.url(TOKEN)) as websocket:
             await websocket.send(proto.dumps({"t": proto.C_HELLO, "device": {"id": "dev-q"}}))
-            ready = proto.loads(await asyncio.wait_for(websocket.recv(), timeout=5))
-        self.assertEqual(ready["t"], proto.S_READY)
-        self.assertEqual(ready["session"], "mobile:dev-q")
+            frame = proto.loads(await asyncio.wait_for(websocket.recv(), timeout=5))
+            self.assertEqual(frame["t"], proto.S_ERROR)
+            self.assertEqual(frame["code"], proto.E_AUTH_FAILED)
+            with self.assertRaises(websockets.exceptions.ConnectionClosed) as ctx:
+                await asyncio.wait_for(websocket.recv(), timeout=5)
+            self.assertEqual(ctx.exception.rcvd.code, mobile_adapter.CLOSE_UNAUTHORIZED)
 
     async def test_first_frame_must_be_hello(self):
         await self.adapter.connect()

@@ -226,9 +226,9 @@ class HermesMobileClient:
 
     async def connect(self) -> Ready:
         """Открывает соединение, проходит ``hello`` и возвращает кадр ``ready``."""
-        separator = "&" if "?" in self.url else "?"
+        # Токен не уходит в URL (query-строки видны в логах прокси) — только в кадре hello.
         socket = await websockets.connect(
-            f"{self.url}{separator}token={self.token}",
+            self.url,
             max_size=MAX_FRAME_BYTES,
             open_timeout=self.open_timeout,
         )

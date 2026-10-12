@@ -37,23 +37,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import importlib.util
 import logging
 import os
-import subprocess
-import sys
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, quote
 
 try:  # обычная загрузка как пакет плагина
     from . import protocol as proto
+    from . import i18n
 except ImportError:  # pragma: no cover — загрузка адаптера как отдельного модуля
     import protocol as proto  # type: ignore
+    import i18n  # type: ignore
 
 from gateway.config import Platform
 from gateway.platforms._shared import (
@@ -61,6 +61,7 @@ from gateway.platforms._shared import (
     get_scoped_secret as _get_scoped_secret,
     seed_extra_from_env as _seed_extra_from_env,
 )
+from hermes_constants import get_hermes_home as _get_hermes_home
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator, cancel_task
@@ -68,11 +69,12 @@ from gateway.platforms.helpers import MessageDeduplicator, cancel_task
 logger = logging.getLogger(__name__)
 
 PLATFORM_NAME = "mobile"
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PATH = "/ws"
 DEFAULT_HELLO_TIMEOUT = 15.0
 DEFAULT_TYPING_IDLE_SECONDS = 3.0
+MAX_OPEN_MEDIA_UPLOADS = 8  # незавершённых многочастных загрузок на устройство
 CLOSE_UNAUTHORIZED = 1008  # policy violation — WebSocket-стандарт для отказа в доступе
 
 
@@ -92,6 +94,12 @@ class MobileDevice:
 
     def display_name(self) -> str:
         return self.name or self.user_name or self.device_id
+
+
+def _is_loopback(host: str) -> bool:
+    """Локальный peer (127.0.0.0/8, ::1): с него разрешена служебная доставка cron."""
+    value = str(host or "").strip()
+    return value.startswith("127.") or value in {"::1", "localhost"}
 
 
 def _env_or_extra(extra: Dict[str, Any], env_key: str, extra_key: str, default: Any = None) -> Any:
@@ -137,7 +145,7 @@ def validate_target_ref(target_ref: str) -> bool | str:
     """Проверка адреса доставки: непустое имя устройства (диагностику показывает шлюз)."""
     raw = str(target_ref or "").strip()
     if not raw:
-        return "Пустой адрес: укажите устройство, например mobile:tel-1"
+        return i18n.t("err.empty_target")
     return True
 
 
@@ -155,9 +163,16 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self.token = str(_env_or_extra(extra, "MOBILE_TOKEN", "token", "") or "").strip()
         raw_extra_tokens = _env_or_extra(extra, "MOBILE_EXTRA_TOKENS", "extra_tokens", "")
         if isinstance(raw_extra_tokens, (list, tuple, set)):
-            self.extra_tokens = [str(t).strip() for t in raw_extra_tokens if str(t).strip()]
-        else:
-            self.extra_tokens = proto.split_tokens(raw_extra_tokens)
+            raw_extra_tokens = ",".join(str(item).strip() for item in raw_extra_tokens if str(item).strip())
+        # Элемент ``device_id=token`` привязывает токен к устройству: с этим токеном нельзя
+        # занять чужой device id (иначе перехват чужой сессии, ответов и карточек одобрения).
+        self.token_bindings = proto.split_token_bindings(raw_extra_tokens)
+        self.extra_tokens = list(self.token_bindings)
+        # ``deliver`` (служебная доставка от cron) разрешён только loopback-пиру или
+        # соединению с токеном из ``MOBILE_DELIVER_TOKENS``.
+        self.deliver_tokens = set(
+            proto.split_tokens(_env_or_extra(extra, "MOBILE_DELIVER_TOKENS", "deliver_tokens", ""))
+        )
         self.host = str(_env_or_extra(extra, "MOBILE_HOST", "host", DEFAULT_HOST) or DEFAULT_HOST)
         self.port = coerce_port(_env_or_extra(extra, "MOBILE_PORT", "port", DEFAULT_PORT), DEFAULT_PORT)
         raw_path = str(_env_or_extra(extra, "MOBILE_PATH", "path", DEFAULT_PATH) or DEFAULT_PATH)
@@ -189,12 +204,12 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self.listener_base: Optional[str] = None  # ws://host:port/path — публикуется в статусе шлюза
         self._sessions: Dict[str, MobileDevice] = {}          # chat_id -> устройство
         self._connections: Dict[str, Any] = {}                # chat_id -> websocket
+        self._connection_tokens: Dict[str, str] = {}          # chat_id -> токен соединения
+        self._deliver_allowed: Dict[str, bool] = {}           # chat_id -> можно ли слать deliver
         self._lock = asyncio.Lock()
         self._dedup = MessageDeduplicator(max_size=4000, ttl_seconds=600)
         self._idle_tasks: Dict[str, asyncio.Task] = {}
-        self._media_dir = Path(
-            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
-        ).expanduser() / "mobile-media"
+        self._media_dir = Path(_get_hermes_home()).expanduser() / "mobile-media"
         # Карточки-вопросы (одобрение команды, clarify, подтверждение слэш-команды):
         # prompt_id → {kind, session_key, chat_id, token, choices, created_at}.
         self._pending_prompts: Dict[str, Dict[str, Any]] = {}
@@ -223,18 +238,18 @@ class HermesMobileAdapter(BasePlatformAdapter):
         if not self.token:
             return self._fail(
                 "config_missing",
-                "MOBILE_TOKEN не задан: мобильное приложение не сможет авторизоваться "
-                "(сгенерируйте токен: openssl rand -hex 32)",
+                "MOBILE_TOKEN is not set: the mobile app will not be able to authenticate "
+                "(generate a token: openssl rand -hex 32)",
                 retryable=False,
             )
         if not self._acquire_platform_lock(
-            PLATFORM_NAME, f"{self.host}:{self.port}", f"адаптер hermes-mobile на {self.host}:{self.port}"
+            PLATFORM_NAME, f"{self.host}:{self.port}", f"hermes-mobile adapter on {self.host}:{self.port}"
         ):
             return False
         try:
             import websockets
         except ImportError as exc:  # pragma: no cover — ставится ensure_deps_fn
-            return self._fail("deps_missing", f"не установлен пакет websockets: {exc}", retryable=False)
+            return self._fail("deps_missing", f"websockets package is not installed: {exc}", retryable=False)
         try:
             self._server = await websockets.serve(
                 self._handle_connection,
@@ -245,11 +260,11 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 ping_timeout=20,
             )
         except OSError as exc:
-            return self._fail("bind_failed", f"не удалось занять {self.host}:{self.port} — {exc}", retryable=True)
+            return self._fail("bind_failed", f"failed to bind {self.host}:{self.port} — {exc}", retryable=True)
         self.listener_base = f"ws://{self.host}:{self.port}{self.path}"
         self._mark_connected(listener_base=self.listener_base)
         logger.info(
-            "hermes-mobile: слушаю ws://%s:%s%s (устройств в белом списке: %d)",
+            "hermes-mobile: listening on ws://%s:%s%s (allow-listed devices: %d)",
             self.host, self.port, self.path, len(self.allowed_devices),
         )
         return True
@@ -283,27 +298,27 @@ class HermesMobileAdapter(BasePlatformAdapter):
         device: Optional[MobileDevice] = None
         try:
             if not self._path_matches(websocket):
-                await self._reject(websocket, proto.E_UNSUPPORTED, f"Неизвестный путь {self._request_path(websocket)}")
+                await self._reject(websocket, proto.E_UNSUPPORTED, i18n.t("err.unknown_path", path=self._request_path(websocket)))
                 return
             raw = await asyncio.wait_for(websocket.recv(), timeout=self.hello_timeout)
             frame = proto.loads(raw)
             if proto.frame_type(frame) != proto.C_HELLO:
-                await self._reject(websocket, proto.E_BAD_FRAME, "Первым кадром должен быть hello")
+                await self._reject(websocket, proto.E_BAD_FRAME, i18n.t("err.first_frame_hello"))
                 return
             token = self._token_from(frame, websocket)
             if not proto.is_authorized(token, self._all_tokens()):
-                logger.warning("hermes-mobile: отклонено подключение, токен %s", proto.redact_token(token))
-                await self._reject(websocket, proto.E_AUTH_FAILED, "Неверный токен приложения")
+                logger.warning("hermes-mobile: connection rejected, token %s", proto.redact_token(token))
+                await self._reject(websocket, proto.E_AUTH_FAILED, i18n.t("err.bad_token"))
                 return
 
             info = proto.parse_device(frame)
             candidate = info.get("id") or proto.parse_user(frame).get("id") or ""
             if not proto.device_allowed(candidate, self.allowed_devices):
-                logger.warning("hermes-mobile: устройство %s не в списке разрешённых", candidate or "<без id>")
-                await self._reject(websocket, proto.E_AUTH_FAILED, "Устройство не в списке разрешённых")
+                logger.warning("hermes-mobile: device %s is not in the allow list", candidate or "<no id>")
+                await self._reject(websocket, proto.E_AUTH_FAILED, i18n.t("err.device_not_allowed"))
                 return
 
-            device = self._register(frame, websocket)
+            device = self._register(frame, websocket, token)
             await self._push(
                 device,
                 {
@@ -326,25 +341,25 @@ class HermesMobileAdapter(BasePlatformAdapter):
                     },
                 },
             )
-            logger.info("hermes-mobile: подключилось устройство %s (%s)", device.device_id, device.display_name())
+            logger.info("hermes-mobile: device %s (%s) connected", device.device_id, device.display_name())
 
             async for raw in websocket:
                 await self._dispatch(device, websocket, raw)
         except proto.ProtocolError as exc:
-            logger.warning("hermes-mobile: ошибка протокола — %s", exc.message)
+            logger.warning("hermes-mobile: protocol error — %s", exc.message)
             with contextlib.suppress(Exception):
                 await websocket.send(proto.dumps(exc.to_frame()))
             if exc.fatal:
                 with contextlib.suppress(Exception):
                     await websocket.close(code=CLOSE_UNAUTHORIZED, reason=exc.code)
         except asyncio.TimeoutError:
-            logger.warning("hermes-mobile: приветствие не получено за %.0f с", self.hello_timeout)
+            logger.warning("hermes-mobile: no hello received within %.0f s", self.hello_timeout)
             with contextlib.suppress(Exception):
                 await websocket.close(code=CLOSE_UNAUTHORIZED, reason="hello timeout")
         except asyncio.CancelledError:  # shuts down cleanly
             raise
         except Exception:
-            logger.exception("hermes-mobile: соединение завершилось ошибкой")
+            logger.exception("hermes-mobile: connection failed")
         finally:
             if device is not None:
                 await self._unregister(device)
@@ -372,9 +387,9 @@ class HermesMobileAdapter(BasePlatformAdapter):
             elif kind == proto.C_ACK:
                 return
             elif kind == proto.C_HELLO:
-                raise proto.ProtocolError(proto.E_BAD_FRAME, "Повторное приветствие в одном соединении")
+                raise proto.ProtocolError(proto.E_BAD_FRAME, i18n.t("err.repeated_hello"))
             else:
-                logger.debug("hermes-mobile: неизвестный кадр %r — игнорирую", proto.frame_type(frame))
+                logger.debug("hermes-mobile: unknown frame %r — ignoring", proto.frame_type(frame))
         except proto.ProtocolError as exc:
             logger.warning("hermes-mobile: %s (%s)", exc.message, exc.code)
             await websocket.send(proto.dumps(exc.to_frame()))
@@ -384,7 +399,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
     async def _on_text(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
         message_id = proto.client_id(frame) or uuid.uuid4().hex
         if self._dedup.is_duplicate(f"{device.chat_id}:{message_id}"):
-            logger.info("hermes-mobile: дубликат сообщения %s — пропускаю", message_id)
+            logger.info("hermes-mobile: duplicate message %s — skipping", message_id)
             return
         text = proto.require_text(frame)
         await self._set_avatar(device, "thinking")
@@ -399,7 +414,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
     async def _on_audio(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
         message_id = proto.client_id(frame) or uuid.uuid4().hex
         if self._dedup.is_duplicate(f"{device.chat_id}:{message_id}"):
-            logger.info("hermes-mobile: дубликат голосового %s — пропускаю", message_id)
+            logger.info("hermes-mobile: duplicate voice message %s — skipping", message_id)
             return
         audio, fmt = proto.require_audio(frame)
         path = self._store_audio(message_id, audio, fmt)
@@ -428,15 +443,34 @@ class HermesMobileAdapter(BasePlatformAdapter):
         if info["parts"] > 1:
             # Многочастный файл: собираем куски и дедуп проверяем только на целом файле —
             # иначе вторая часть была бы отброшена как «повтор» первой.
-            buffer = self._media_buffers.setdefault(
-                key,
-                {"parts": info["parts"], "chunks": {}, "kind": info["kind"], "mime": info["mime"],
-                 "filename": info["filename"], "caption": info["caption"]},
-            )
+            buffer = self._media_buffers.get(key)
+            if buffer is None:
+                # Ограничиваем незавершённые загрузки: иначе клиент держит память шлюза
+                # открытыми буферами (и по числу загрузок, и по суммарному объёму).
+                if len(self._device_buffers(device.chat_id)) >= MAX_OPEN_MEDIA_UPLOADS:
+                    raise proto.ProtocolError(
+                        proto.E_TOO_BIG,
+                        i18n.t("err.too_many_uploads", limit=MAX_OPEN_MEDIA_UPLOADS),
+                    )
+                buffer = {
+                    "parts": info["parts"], "chunks": {}, "bytes": 0, "kind": info["kind"],
+                    "mime": info["mime"], "filename": info["filename"], "caption": info["caption"],
+                }
+                self._media_buffers[key] = buffer
             buffer["chunks"][info["part"]] = info["data"]
+            buffer["bytes"] = int(buffer.get("bytes") or 0) + len(info["data"])
+            if (
+                buffer["bytes"] > proto.MAX_MEDIA_BYTES
+                or self._device_buffer_bytes(device.chat_id) > proto.MAX_MEDIA_BYTES
+            ):
+                self._media_buffers.pop(key, None)
+                raise proto.ProtocolError(
+                    proto.E_TOO_BIG,
+                    i18n.t("err.total_upload_too_big", limit=proto.MAX_MEDIA_BYTES // (1024 * 1024)),
+                )
             if len(buffer["chunks"]) < info["parts"]:
                 logger.debug(
-                    "hermes-mobile: медиа %s — часть %d/%d", message_id, info["part"] + 1, info["parts"]
+                    "hermes-mobile: media %s — part %d/%d", message_id, info["part"] + 1, info["parts"]
                 )
                 return
             part_map = buffer["chunks"]
@@ -445,7 +479,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             part_map = {0: info["data"]}
         if self._dedup.is_duplicate(key):
             self._media_buffers.pop(key, None)
-            logger.info("hermes-mobile: дубликат медиа %s — пропускаю", message_id)
+            logger.info("hermes-mobile: duplicate media %s — skipping", message_id)
             return
         payload = b"".join(part_map[index] for index in sorted(part_map))
         self._media_buffers.pop(key, None)
@@ -458,7 +492,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
         if len(payload) > proto.MAX_MEDIA_BYTES:
             raise proto.ProtocolError(
                 proto.E_TOO_BIG,
-                f"Файл больше {proto.MAX_MEDIA_BYTES // (1024 * 1024)} МБ — сократите или сожмите его",
+                i18n.t("err.file_too_big", limit=proto.MAX_MEDIA_BYTES // (1024 * 1024)),
             )
         suffix = Path(info["filename"] or "").suffix or _default_suffix(info["kind"], info["mime"])
         path = self._store_bytes(message_id, payload, suffix)
@@ -484,32 +518,37 @@ class HermesMobileAdapter(BasePlatformAdapter):
 
     async def _on_deliver(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
         """Служебная доставка от другого процесса (cron) — отдаём целевому устройству."""
+        if not self._deliver_allowed.get(device.chat_id, False):
+            raise proto.ProtocolError(
+                proto.E_FORBIDDEN,
+                i18n.t("err.deliver_not_allowed"),
+            )
         target = str(frame.get("target") or "").strip() or self.home_device
         text = str(frame.get("text") or "")
         media = frame.get("media")
         if not text.strip() and not (isinstance(media, dict) and media.get("data")):
-            raise proto.ProtocolError(proto.E_BAD_FRAME, "В кадре deliver нет ни text, ни media")
+            raise proto.ProtocolError(proto.E_BAD_FRAME, i18n.t("err.deliver_empty"))
         session = await self._session_for(target)
         if session is None:
-            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, f"Устройство {target or '<по умолчанию>'} не подключено")
+            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, i18n.t("err.device_offline", device=target or i18n.t("err.device_default")))
         if isinstance(media, dict) and media.get("data"):
             await self._deliver_media(session, media, text)
             return
         result = await self.send(session.chat_id, text)
         if not result.success:
-            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, result.error or "не доставлено")
+            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, result.error or "not delivered")
 
     async def _deliver_media(self, session: MobileDevice, media: Dict[str, Any], caption: str) -> None:
         """Вложение из служебной доставки: сохраняем во временный файл и отдаём как медиа."""
         try:
             payload = base64.b64decode(str(media.get("data") or ""), validate=True)
         except (ValueError, binascii.Error) as exc:
-            raise proto.ProtocolError(proto.E_BAD_FRAME, "Поле media.data не является корректным base64") from exc
+            raise proto.ProtocolError(proto.E_BAD_FRAME, i18n.t("err.media_bad_base64")) from exc
         if not payload:
-            raise proto.ProtocolError(proto.E_BAD_FRAME, "Пустое вложение")
+            raise proto.ProtocolError(proto.E_BAD_FRAME, i18n.t("err.empty_attachment"))
         if len(payload) > proto.MAX_MEDIA_BYTES:
             raise proto.ProtocolError(
-                proto.E_TOO_BIG, f"Вложение больше {proto.MAX_MEDIA_BYTES // (1024 * 1024)} МБ"
+                proto.E_TOO_BIG, i18n.t("err.attachment_too_big", limit=proto.MAX_MEDIA_BYTES // (1024 * 1024))
             )
         kind = str(media.get("kind") or "document")
         filename = str(media.get("filename") or "") or None
@@ -520,7 +559,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             session.chat_id, str(path), out_kind, caption or None, filename=filename
         )
         if not result.success:
-            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, result.error or "вложение не доставлено")
+            raise proto.ProtocolError(proto.E_DEVICE_OFFLINE, result.error or "attachment not delivered")
 
     def _build_event(
         self,
@@ -608,15 +647,15 @@ class HermesMobileAdapter(BasePlatformAdapter):
             try:
                 payload = Path(path).read_bytes()
             except OSError as exc:
-                logger.warning("hermes-mobile: не прочитал файл %s — %s", path, exc)
+                logger.warning("hermes-mobile: could not read file %s — %s", path, exc)
         if not payload and not url:
-            return SendResult(success=False, error=f"Файл недоступен: {path}", retryable=False)
+            return SendResult(success=False, error=f"File unavailable: {path}", retryable=False)
         if payload and len(payload) > proto.MAX_MEDIA_BYTES:
             return SendResult(
                 success=False,
                 error=(
-                    f"Файл {len(payload) / 1048576:.1f} МБ больше лимита "
-                    f"{proto.MAX_MEDIA_BYTES // 1048576} МБ для мобильного канала"
+                    f"File is {len(payload) / 1048576:.1f} MB, above the "
+                    f"{proto.MAX_MEDIA_BYTES // 1048576} MB limit of the mobile channel"
                 ),
                 retryable=False,
             )
@@ -747,7 +786,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 await asyncio.sleep(human_delay)
         if delivered:
             return SendResult(success=True, message_id=last_id)
-        return SendResult(success=False, error=first_error or "Ни одна картинка не доставлена")
+        return SendResult(success=False, error=first_error or "no image was delivered")
 
     # ── карточки-вопросы (одобрение команды, clarify, подтверждение) ─────────
 
@@ -762,6 +801,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
         token: str = "",
         choices: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Шлёт приложению карточку с вариантами и запоминает её до ответа или истечения.
 
@@ -780,23 +820,23 @@ class HermesMobileAdapter(BasePlatformAdapter):
             "choices": list(choices or []),
             "created_at": time.time(),
         }
-        ok = await self._push(
-            session,
-            {
-                "t": proto.S_PROMPT,
-                "id": prompt_id,
-                "kind": kind,
-                "text": text,
-                "options": options,
-                "session": session.chat_id,
-                "timeout_seconds": int(self.prompt_ttl),
-            },
-        )
+        payload: Dict[str, Any] = {
+            "t": proto.S_PROMPT,
+            "id": prompt_id,
+            "kind": kind,
+            "text": text,
+            "options": options,
+            "session": session.chat_id,
+            "timeout_seconds": int(self.prompt_ttl),
+        }
+        if extra_fields:
+            payload.update({key: value for key, value in extra_fields.items() if value not in (None, "")})
+        ok = await self._push(session, payload)
         if not ok:
             self._pending_prompts.pop(prompt_id, None)
             return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
         self._schedule_prompt_expiry(prompt_id)
-        logger.info("hermes-mobile: карточка %s (%s) отправлена устройству %s", prompt_id, kind, session.device_id)
+        logger.info("hermes-mobile: prompt %s (%s) sent to device %s", prompt_id, kind, session.device_id)
         return SendResult(success=True, message_id=prompt_id)
 
     async def _send_exec_approval_prompt(self, prompt) -> SendResult:
@@ -816,6 +856,12 @@ class HermesMobileAdapter(BasePlatformAdapter):
             options=options,
             session_key=prompt.session_key,
             metadata=getattr(prompt, "metadata", None),
+            # Команду и описание отдаём отдельными полями: приложение показывает их
+            # рядом с кнопками, чтобы человек видел, что именно одобряет.
+            extra_fields={
+                "command": str(getattr(prompt, "command", "") or ""),
+                "description": str(getattr(prompt, "description", "") or ""),
+            },
         )
 
     async def send_slash_confirm(
@@ -834,9 +880,9 @@ class HermesMobileAdapter(BasePlatformAdapter):
             kind=proto.P_SLASH_CONFIRM,
             text=text,
             options=[
-                {"id": "once", "label": "✅ Одобрить один раз", "style": "primary"},
-                {"id": "always", "label": "🔒 Всегда одобрять", "style": ""},
-                {"id": "cancel", "label": "❌ Отмена", "style": "danger"},
+                {"id": "once", "label": i18n.t("label.approve_once"), "style": "primary"},
+                {"id": "always", "label": i18n.t("label.approve_always"), "style": ""},
+                {"id": "cancel", "label": i18n.t("label.cancel"), "style": "danger"},
             ],
             session_key=session_key,
             token=confirm_id,
@@ -858,7 +904,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             for index, choice in enumerate(choices or [])
         ]
         if options:
-            options.append({"id": proto.CLARIFY_OTHER, "label": "✏️ Свой ответ", "style": ""})
+            options.append({"id": proto.CLARIFY_OTHER, "label": i18n.t("label.clarify_other"), "style": ""})
         return await self._send_prompt(
             chat_id=chat_id,
             kind=proto.P_CLARIFY,
@@ -873,11 +919,21 @@ class HermesMobileAdapter(BasePlatformAdapter):
     async def _on_prompt_response(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
         """Ответ на карточку: резолвим через штатные резолверы Hermes, не как сообщение в чат."""
         info = proto.parse_prompt_response(frame)
-        pending = self._pending_prompts.pop(info["prompt_id"], None)
+        pending = self._pending_prompts.get(info["prompt_id"])
         if pending is None:
-            logger.info("hermes-mobile: ответ на неизвестную/истёкшую карточку %s — игнорирую", info["prompt_id"])
+            logger.info("hermes-mobile: response to unknown/expired prompt %s — ignoring", info["prompt_id"])
             await self._push(device, {"t": proto.S_PROMPT_DONE, "id": info["prompt_id"], "expired": True})
             return
+        # Карточку может закрыть только то устройство, которому она показана: иначе
+        # подключившийся с общим токеном клиент одобрял бы чужие опасные команды.
+        if pending.get("chat_id") and pending["chat_id"] != device.chat_id:
+            logger.warning(
+                "hermes-mobile: device %s answered prompt %s of another device — denied",
+                device.device_id,
+                info["prompt_id"],
+            )
+            raise proto.ProtocolError(proto.E_FORBIDDEN, i18n.t("err.prompt_other_device"))
+        self._pending_prompts.pop(info["prompt_id"], None)
         task = self._prompt_tasks.pop(info["prompt_id"], None)
         if task is not None:
             task.cancel()
@@ -901,7 +957,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             from asyncio import to_thread as _to_thread  # резолвер синхронный
             count = await _to_thread(resolve_gateway_approval, pending["session_key"], choice)
             logger.info(
-                "hermes-mobile: одобрение команды → %s (ожидающих: %s)", choice, count
+                "hermes-mobile: command approval → %s (pending: %s)", choice, count
             )
             return choice
         if kind == proto.P_SLASH_CONFIRM:
@@ -928,7 +984,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 return proto.CLARIFY_OTHER
             resolve_gateway_clarify(pending["token"], choices[index])
             return option_id
-        logger.warning("hermes-mobile: неизвестный тип карточки %r", kind)
+        logger.warning("hermes-mobile: unknown prompt kind %r", kind)
         return None
 
     def _schedule_prompt_expiry(self, prompt_id: str) -> None:
@@ -946,11 +1002,11 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 session = await self._session_for(pending["chat_id"])
                 if session is not None:
                     await self._push(session, {"t": proto.S_PROMPT_DONE, "id": prompt_id, "expired": True})
-                logger.info("hermes-mobile: карточка %s истекла", prompt_id)
+                logger.info("hermes-mobile: prompt %s expired", prompt_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("hermes-mobile: не удалось закрыть карточку %s", prompt_id, exc_info=True)
+                logger.debug("hermes-mobile: could not close prompt %s", prompt_id, exc_info=True)
             finally:
                 self._prompt_tasks.pop(prompt_id, None)
 
@@ -1052,22 +1108,36 @@ class HermesMobileAdapter(BasePlatformAdapter):
         return path.rstrip("/").endswith(self.path.rstrip("/"))
 
     def _token_from(self, frame: Dict[str, Any], websocket) -> Optional[str]:
-        """Токен из кадра ``hello`` либо из параметра ``?token=`` в URL."""
+        """Токен только из кадра ``hello``: query-параметры попадают в логи прокси."""
         token = frame.get("token")
-        if token:
-            return str(token).strip()
-        query = self._request_path(websocket).split("?", 1)
-        if len(query) == 2:
-            values = parse_qs(query[1]).get("token") or []
-            if values:
-                return values[0].strip()
-        return None
+        return str(token).strip() if token else None
 
-    def _register(self, frame: Dict[str, Any], websocket) -> MobileDevice:
+    def _register(self, frame: Dict[str, Any], websocket, token: str = "") -> MobileDevice:
         info = proto.parse_device(frame)
         user = proto.parse_user(frame)
         device_id = info.get("id") or user.get("id") or f"dev-{uuid.uuid4().hex[:8]}"
         chat_id = f"{PLATFORM_NAME}:{device_id}"
+        # Токен, привязанный к устройству (``device_id=token``), не может занять другой id.
+        bound = self.token_bindings.get(token, "")
+        if bound and bound != device_id:
+            raise proto.ProtocolError(
+                proto.E_FORBIDDEN,
+                i18n.t("err.token_bound", device=bound),
+                fatal=True,
+            )
+        existing = self._connections.get(chat_id)
+        if existing is not None and existing is not websocket:
+            if self._connection_tokens.get(chat_id, "") != token:
+                raise proto.ProtocolError(
+                    proto.E_FORBIDDEN,
+                    i18n.t("err.device_connected", device=device_id),
+                    fatal=True,
+                )
+            # То же устройство с тем же токеном — это переподключение: закрываем старое.
+            with contextlib.suppress(Exception):
+                asyncio.create_task(existing.close(code=1000, reason="replaced by a new connection"))
+        peer = getattr(websocket, "remote_address", None)
+        peer_host = peer[0] if isinstance(peer, (tuple, list)) and peer else ""
         now = time.time()
         device = MobileDevice(
             device_id=device_id,
@@ -1082,15 +1152,34 @@ class HermesMobileAdapter(BasePlatformAdapter):
         )
         self._sessions[chat_id] = device
         self._connections[chat_id] = websocket
+        self._connection_tokens[chat_id] = token
+        # Служебные кадры доставки — только от cron: loopback-пир или отдельный токен.
+        self._deliver_allowed[chat_id] = bool(token) and (
+            token in self.deliver_tokens or _is_loopback(peer_host)
+        )
         return device
+
+    def _device_buffers(self, chat_id: str) -> Dict[str, Dict[str, Any]]:
+        """Незавершённые многочастные загрузки конкретного устройства."""
+        prefix = f"{chat_id}:"
+        return {key: value for key, value in self._media_buffers.items() if key.startswith(prefix)}
+
+    def _device_buffer_bytes(self, chat_id: str) -> int:
+        """Сколько байт устройство уже держит в незавершённых загрузках."""
+        return sum(int(buffer.get("bytes") or 0) for buffer in self._device_buffers(chat_id).values())
 
     async def _unregister(self, device: MobileDevice) -> None:
         self._connections.pop(device.chat_id, None)
+        self._connection_tokens.pop(device.chat_id, None)
+        self._deliver_allowed.pop(device.chat_id, None)
+        # Незавершённые загрузки отключившегося устройства больше никто не дополнит.
+        for key in list(self._device_buffers(device.chat_id)):
+            self._media_buffers.pop(key, None)
         self._sessions.pop(device.chat_id, None)
         task = self._idle_tasks.pop(device.chat_id, None)
         if task is not None:
             await cancel_task(task)
-        logger.info("hermes-mobile: устройство %s отключилось", device.device_id)
+        logger.info("hermes-mobile: device %s disconnected", device.device_id)
 
     async def _session_for(self, chat_id: str) -> Optional[MobileDevice]:
         """Ищет устройство по ``chat_id``, по «сырому» id и по домашнему устройству."""
@@ -1112,7 +1201,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             device.last_seen = time.time()
             return True
         except Exception as exc:
-            logger.info("hermes-mobile: не смог отправить кадр устройству %s — %s", device.device_id, exc)
+            logger.info("hermes-mobile: could not send a frame to device %s — %s", device.device_id, exc)
             return False
 
     async def _reject(self, websocket, code: str, message: str) -> None:
@@ -1140,7 +1229,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("hermes-mobile: не удалось вернуть аватар в idle", exc_info=True)
+                logger.debug("hermes-mobile: could not return avatar to idle", exc_info=True)
             finally:
                 self._idle_tasks.pop(device.chat_id, None)
 
@@ -1152,28 +1241,10 @@ class HermesMobileAdapter(BasePlatformAdapter):
 def check_requirements() -> bool:
     """ПАССИВНАЯ проверка зависимостей: пакет ``websockets`` доступен сейчас?
 
-    Контракт Hermes: эта функция не должна ничего устанавливать — её свободно вызывают
-    индикаторы статуса. Установкой занимается ``ensure_deps`` (``ensure_deps_fn``),
-    и только когда платформа уже включена и вот-вот подключится.
+    Контракт Hermes: проверка пассивная — её свободно вызывают индикаторы статуса.
+    ``websockets`` входит в окружение Hermes, поэтому установка не требуется.
     """
     return importlib.util.find_spec("websockets") is not None
-
-
-def ensure_deps() -> bool:
-    """АКТИВНАЯ установка зависимости (``websockets``) в текущее окружение."""
-    if check_requirements():
-        return True
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", "websockets>=12"],
-            check=True,
-            timeout=180,
-        )
-    except Exception as exc:  # pragma: no cover — нет сети/pip
-        logger.error("hermes-mobile: не удалось установить websockets — %s", exc)
-        return False
-    importlib.invalidate_caches()
-    return check_requirements()
 
 
 def validate_config(config) -> bool:
@@ -1200,6 +1271,7 @@ def _env_enablement() -> Optional[dict]:
             ("MOBILE_AVATAR_URL", "avatar_url", None),
             ("MOBILE_ALLOWED_DEVICES", "allowed_devices", lambda v: proto.split_tokens(v)),
             ("MOBILE_EXTRA_TOKENS", "extra_tokens", lambda v: proto.split_tokens(v)),
+            ("MOBILE_DELIVER_TOKENS", "deliver_tokens", lambda v: proto.split_tokens(v)),
         ),
         home_env="MOBILE_HOME_DEVICE",
         home_default=home_device or None,
@@ -1225,7 +1297,7 @@ async def standalone_send(
     extra = getattr(config, "extra", {}) or {}
     token = str(_env_or_extra(extra, "MOBILE_TOKEN", "token", "") or "").strip()
     if not token:
-        return {"error": "MOBILE_TOKEN не задан"}
+        return {"error": "MOBILE_TOKEN is not set"}
     host = str(_env_or_extra(extra, "MOBILE_HOST", "host", "127.0.0.1") or "127.0.0.1")
     port = coerce_port(_env_or_extra(extra, "MOBILE_PORT", "port", DEFAULT_PORT), DEFAULT_PORT)
     raw_path = "/" + str(_env_or_extra(extra, "MOBILE_PATH", "path", DEFAULT_PATH) or DEFAULT_PATH).strip().strip("/")
@@ -1234,8 +1306,8 @@ async def standalone_send(
     try:
         import websockets
     except ImportError as exc:
-        return {"error": f"websockets недоступен: {exc}"}
-    url = f"ws://{host}:{port}{raw_path}?token={quote(token)}"
+        return {"error": f"websockets is unavailable: {exc}"}
+    url = f"ws://{host}:{port}{raw_path}"
     message_id = uuid.uuid4().hex
     try:
         async with websockets.connect(url, max_size=proto.MAX_FRAME_BYTES, open_timeout=10) as websocket:
@@ -1244,13 +1316,13 @@ async def standalone_send(
                     {
                         "t": proto.C_HELLO,
                         "token": token,
-                        "device": {"id": "standalone", "name": "Hermes (вне процесса шлюза)"},
+                        "device": {"id": "standalone", "name": "Hermes (outside the gateway process)"},
                     }
                 )
             )
             ready = proto.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
             if proto.frame_type(ready) != proto.S_READY:
-                return {"error": str(ready.get("message") or "шлюз отказал в подключении")}
+                return {"error": str(ready.get("message") or "the gateway refused the connection")}
             for index, chunk in enumerate(proto.chunk_text(message, proto.DEFAULT_CHUNK_LIMIT) or [""]):
                 await websocket.send(
                     proto.dumps(
@@ -1265,11 +1337,11 @@ async def standalone_send(
             for path in list(media_files or []):
                 file_path = Path(str(path))
                 if not file_path.is_file():
-                    logger.warning("hermes-mobile: вложение %s недоступно — пропускаю", path)
+                    logger.warning("hermes-mobile: attachment %s is unavailable — skipping", path)
                     continue
                 payload = file_path.read_bytes()
                 if len(payload) > proto.MAX_MEDIA_BYTES:
-                    return {"error": f"вложение {file_path.name} больше {proto.MAX_MEDIA_BYTES // (1024 * 1024)} МБ"}
+                    return {"error": f"attachment {file_path.name} exceeds {proto.MAX_MEDIA_BYTES // (1024 * 1024)} MB"}
                 kind = "image" if proto.guess_mime(file_path.name).startswith("image/") else "document"
                 await websocket.send(
                     proto.dumps(
@@ -1289,36 +1361,36 @@ async def standalone_send(
                 )
             return {"success": True, "message_id": message_id}
     except Exception as exc:
-        return {"error": f"шлюз недоступен ({exc.__class__.__name__}: {exc})"}
+        return {"error": f"gateway unreachable ({exc.__class__.__name__}: {exc})"}
 
 
 def interactive_setup() -> None:
     """``hermes gateway setup``: интерактивная настройка платформы."""
     from hermes_cli.setup import prompt, prompt_yes_no, save_env_value, print_header, print_info, print_success
 
-    print_header("Mobile App (WebSocket)")
-    print_info("Токен приложения защищает WebSocket-подключение вашего телефона.")
-    token = prompt("Токен приложения (пусто — сгенерировать)", password=True).strip()
+    print_header(i18n.t("setup.header"))
+    print_info(i18n.t("setup.intro"))
+    token = prompt(i18n.t("setup.token_prompt"), password=True).strip()
     if not token:
         token = os.urandom(32).hex()
-        print_info(f"Сгенерирован токен: {token} — вставьте его в приложение.")
+        print_info(i18n.t("setup.token_generated", token=token))
     save_env_value("MOBILE_TOKEN", token)
-    host = prompt("Адрес прослушивания", default=DEFAULT_HOST).strip() or DEFAULT_HOST
+    host = prompt(i18n.t("setup.host_prompt"), default=DEFAULT_HOST).strip() or DEFAULT_HOST
     save_env_value("MOBILE_HOST", host)
-    port = prompt("Порт", default=str(DEFAULT_PORT)).strip() or str(DEFAULT_PORT)
+    port = prompt(i18n.t("setup.port_prompt"), default=str(DEFAULT_PORT)).strip() or str(DEFAULT_PORT)
     save_env_value("MOBILE_PORT", port)
-    if prompt_yes_no("Ограничить список устройств?", default=False):
+    if prompt_yes_no(i18n.t("setup.restrict_devices"), default=False):
         save_env_value(
             "MOBILE_ALLOWED_DEVICES",
-            prompt("ID устройств через запятую", default="").strip(),
+            prompt(i18n.t("setup.devices_prompt"), default="").strip(),
         )
-    if prompt_yes_no("Ограничить список пользователей (авторизация Hermes)?", default=False):
+    if prompt_yes_no(i18n.t("setup.restrict_users"), default=False):
         save_env_value(
             "MOBILE_ALLOWED_USERS",
-            prompt("ID пользователей через запятую", default="").strip(),
+            prompt(i18n.t("setup.users_prompt"), default="").strip(),
         )
-    save_env_value("MOBILE_HOME_DEVICE", prompt("ID устройства по умолчанию для cron", default="").strip())
-    print_success("Платформа Mobile App настроена. Перезапустите шлюз: hermes gateway restart")
+    save_env_value("MOBILE_HOME_DEVICE", prompt(i18n.t("setup.home_device_prompt"), default="").strip())
+    print_success(i18n.t("setup.success"))
 
 
 def register(ctx) -> None:
@@ -1330,8 +1402,7 @@ def register(ctx) -> None:
         check_fn=check_requirements,
         validate_config=validate_config,
         required_env=["MOBILE_TOKEN"],
-        install_hint="pip install websockets",
-        ensure_deps_fn=ensure_deps,
+        install_hint="websockets ships with Hermes — update Hermes if it is missing",
         setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
         allowed_users_env="MOBILE_ALLOWED_USERS",
@@ -1345,10 +1416,10 @@ def register(ctx) -> None:
         cron_deliver_env_var="MOBILE_HOME_DEVICE",
         standalone_sender_fn=standalone_send,
         platform_hint=(
-            "Пользователь читает ответ в мобильном приложении на небольшом экране. "
-            "Отвечайте по делу и по-русски; длинные таблицы и простыни логов не подходят — "
-            "лучше короткие абзацы и списки. Ответ озвучивается аватаром, поэтому избегайте "
-            "избыточных эмодзи и служебных пометок."
+            "The user reads the reply in a mobile app on a small screen. Reply in the user's "
+            "language and stay to the point; long tables and wall-of-log dumps do not fit — "
+            "prefer short paragraphs and lists. The reply is voiced by an avatar, so avoid "
+            "excessive emoji and service notes."
         ),
     )
-    logger.debug("hermes-mobile: платформа зарегистрирована")
+    logger.debug("hermes-mobile: platform registered")

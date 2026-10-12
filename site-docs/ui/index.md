@@ -15,12 +15,16 @@
 
 ## Кнопки карточек
 
-Кадр `prompt` несёт `text` и `options[{id,label,style}]`. Нажатие → один кадр `prompt` с
-`prompt_id` и `option_id`; сервер подтверждает `prompt_done` (или `prompt_done{expired:true}`).
+Кадр `prompt` несёт `text` и `options[{id,label,style}]`. Для `exec_approval` сервер дополнительно
+шлёт поля **`command`** (точная команда) и **`description`** — покажите команду рядом с кнопками,
+чтобы человек видел, что одобряет. Нажатие → один кадр `prompt` с `prompt_id` и `option_id`; сервер
+подтверждает `prompt_done` (или `prompt_done{expired:true}`). Карточку может закрыть **только то
+устройство, которому она показана**: ответ с другого соединения получает `forbidden`.
 
 Типы карточек:
 
 * **`exec_approval`** — одобрение опасной команды. `options` — `once` / `session` / `always` / `deny`.
+  Рядом с кнопками показывайте `command` и `description`.
 * **`slash_confirm`** — подтверждение слэш-команды: `once` / `always` / `cancel`.
 * **`clarify`** — уточняющий вопрос: `c0`, `c1`, … плюс `other` («свой ответ», вместе с `text`).
 

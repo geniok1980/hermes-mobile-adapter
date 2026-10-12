@@ -56,8 +56,8 @@ new HermesClient(options: ClientOptions)
 
 | Поле | Тип | Обяз. | По умолчанию | Значение |
 |---|---|---|---|---|
-| `url` | `string` | да | — | Адрес шлюза, `ws://host:8787/ws` или `wss://host/ws`. Токен дописывается к URL как query-параметр. |
-| `token` | `string` | да | — | Токен приложения (`MOBILE_TOKEN`). Уходит и в query, и в кадре `hello`. |
+| `url` | `string` | да | — | Адрес шлюза, `ws://host:8787/ws` или `wss://host/ws`. Токен в URL не передаётся. |
+| `token` | `string` | да | — | Токен приложения (`MOBILE_TOKEN`). Уходит **только** в кадре `hello`. |
 | `device` | `DeviceInfo` | да | — | Устройство, как оно видно в Hermes (pairing, allowlist, cron). |
 | `user` | `{ id?: string; name?: string }` | нет | `{}` | Пользователь — попадает в кадр `hello`. |
 | `handlers` | `HermesClientHandlers` | нет | `{}` | Колбэки событий (см. ниже). |

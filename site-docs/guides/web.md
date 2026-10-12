@@ -6,9 +6,8 @@
 
 ## 1. Подключение и рукопожатие
 
-Токен можно передать параметром `?token=`, а можно только в кадре `hello` — браузер не хранит
-секреты надёжно, поэтому для продакшена вариант с `hello` предпочтительнее (токен не попадёт в
-логи прокси/URL).
+Токен передаётся **только в кадре `hello`** — приём через `?token=` в URL удалён (query-строка
+попадает в логи reverse-proxy). Open-пример ниже так и делает.
 
 ```html
 <script>
@@ -18,11 +17,10 @@
   let socket = null;
 
   function connect(url, token, deviceId) {
-    const full = `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
-    socket = new WebSocket(full);
+    socket = new WebSocket(url);                // токен в URL НЕ передаём
 
     socket.onopen = () => socket.send(JSON.stringify({
-      t: 'hello', v: PROTOCOL_VERSION, token,
+      t: 'hello', v: PROTOCOL_VERSION, token,    // токен только здесь
       device: { id: deviceId, name: 'Браузер', platform: 'web', app_version: '1.0.0' },
     }));
     socket.onmessage = (event) => handle(String(event.data));

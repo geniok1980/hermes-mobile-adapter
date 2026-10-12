@@ -109,7 +109,7 @@ class TestOutboundMedia(BaseWS):
     async def test_missing_file_is_a_real_failure(self):
         result = await self.adapter.send_image_file("mobile:dev-1", "/нет/такого.png")
         self.assertFalse(result.success)
-        self.assertIn("недоступен", result.error or "")
+        self.assertIn("unavailable", result.error or "")
 
     async def test_oversized_file_is_refused(self):
         path = os.path.join(self._hermes_home, "huge.bin")
@@ -117,7 +117,7 @@ class TestOutboundMedia(BaseWS):
             handle.write(b"\x00" * (proto.MAX_MEDIA_BYTES + 1))
         result = await self.adapter.send_document("mobile:dev-1", path)
         self.assertFalse(result.success)
-        self.assertIn("лимита", result.error or "")
+        self.assertIn("above the", result.error or "")
 
     async def test_multiple_images_aggregate_success(self):
         good = os.path.join(self._hermes_home, "one.png")
