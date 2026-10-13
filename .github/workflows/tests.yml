@@ -28,7 +28,7 @@ jobs:
       - name: Зависимости
         run: |
           python -m pip install --upgrade pip
-          pip install "websockets>=12" pyyaml
+          pip install "websockets>=12" pyyaml "ruamel.yaml"
 
       - name: Кэш установки Hermes Agent
         uses: actions/cache@v4
@@ -38,10 +38,11 @@ jobs:
           restore-keys: |
             hermes-agent-${{ runner.os }}-
 
-      # Платформенный API (gateway.*) — модули из чекаута Hermes, поэтому его корень идёт
-      # на PYTHONPATH. Внутреннее окружение установщика не используем: его расположение
-      # зависит от версии установщика, а тестам нужны только gateway.* и их прямые
-      # зависимости (pyyaml + websockets).
+      # Платформенный API (gateway.*) импортируется только тем интерпретатором, где стоят
+      # зависимости Hermes (у установщика это своё окружение). Поэтому не угадываем путь,
+      # а ищем работоспособный интерпретатор: сначала окружения установщика, затем системный
+      # Python с нашими зависимостями. Если ни один не может импортировать API — падаем
+      # здесь, а не «мимо» тестов.
       - name: Hermes Agent (платформенный API)
         run: |
           DIR="$HOME/.hermes/hermes-agent"
@@ -50,14 +51,26 @@ jobs:
               | bash -s -- --non-interactive --skip-browser --skip-computer-use
           fi
           echo "HERMES_DIR=$DIR" >> "$GITHUB_ENV"
-          # Проверка обязательна: без неё часть тестов проходит «мимо» платформенного API.
-          PYTHONPATH="$DIR" python -c "import gateway.config, gateway.platform_registry; print('Hermes API подключён')"
+          echo "кандидаты-интерпретаторы:"
+          find "$HOME/.hermes" "$RUNNER_WORKSPACE" "$HOME" -maxdepth 5 -type f -name 'python3*' -path '*/bin/*' 2>/dev/null | head -20
+          CANDIDATES="$(find "$HOME/.hermes" "$RUNNER_WORKSPACE" -maxdepth 5 -type f -name 'python3*' -path '*/bin/*' 2>/dev/null) $(command -v python3)"
+          for PY in $CANDIDATES; do
+            [ -x "$PY" ] || continue
+            if PYTHONPATH="$DIR" "$PY" -c "import gateway.config, gateway.platform_registry" 2>/dev/null; then
+              echo "HERMES_PY=$PY" >> "$GITHUB_ENV"
+              echo "интерпретатор с платформенным API: $PY"
+              PYTHONPATH="$DIR" "$PY" -c "import gateway.platform_registry as r; print('Hermes API:', r.__file__)"
+              exit 0
+            fi
+          done
+          echo "::error::ни один интерпретатор не смог импортировать gateway.* (каталог: $DIR)"
+          exit 1
 
       - name: Тесты протокола и адаптера
         env:
           PYTHONPATH: ${{ env.HERMES_DIR }}
         run: |
-          python -m unittest discover -s tests -v
+          "${HERMES_PY:-$(command -v python3)}" -m unittest discover -s tests -v
 
       - name: Типчек TypeScript SDK
         run: |
