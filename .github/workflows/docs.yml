@@ -34,8 +34,11 @@ jobs:
       - name: Установить MkDocs Material
         run: pip install -r docs-requirements.txt
 
+      - name: Проверить исходники документации
+        run: python3 scripts/check-docs.py
+
       - name: Собрать сайт
-        run: mkdocs build -d site
+        run: mkdocs build -d site --strict
 
       - uses: actions/upload-pages-artifact@v3
         with:
