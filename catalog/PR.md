@@ -1,5 +1,7 @@
 # PR body — for `NousResearch/hermes-agent` → `plugin-catalog/hermes-mobile.yaml`
 
+**Статус: MERGED** — влит мейнтейнером teknium1 2026-10-13 (merge-коммит `8172ebab6b4f`), финальный ревью — APPROVED на пине `7fdaf232`. Запись живёт в апстриме: `plugin-catalog/hermes-mobile.yaml` в main.
+
 **Adds one catalog entry: `plugin-catalog/hermes-mobile.yaml`** (no other file is touched).
 
 ## What the plugin does
@@ -67,7 +69,7 @@ Test suite in the repository: 97 unit tests over protocol, adapter and capabilit
   (`plugin.yaml`, `__init__.py`, `adapter.py`, `protocol.py`, `README.md`). `sdk/`, `examples/`
   and `site-docs/` are the client-side material (TypeScript/Python SDKs, platform guides,
   protocol reference) and are not part of the plugin tree.
-* `requires_hermes: ">=0.21.3"` — the version the adapter was built and tested against.
+* `requires_hermes: ">=0.21.6"` — the version the adapter was built and tested against.
 * Repository README and docs are in Russian; the plugin README rendered on the catalog page
   (`adapter/hermes_mobile/README.md`) is in English.
 * Dependency: `websockets` only, already present in the Hermes environment — no extra pip
