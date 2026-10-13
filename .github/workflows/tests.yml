@@ -28,7 +28,7 @@ jobs:
       - name: Зависимости
         run: |
           python -m pip install --upgrade pip
-          pip install "websockets>=12"
+          pip install "websockets>=12" pyyaml
 
       - name: Кэш установки Hermes Agent
         uses: actions/cache@v4
@@ -38,9 +38,10 @@ jobs:
           restore-keys: |
             hermes-agent-${{ runner.os }}-
 
-      # Установщик Hermes делает editable-установку пакета hermes_agent в собственное
-      # окружение. Тесты поэтому идут питоном ЭТОГО окружения: с системным интерпретатором
-      # `import gateway` не находится, и часть тестов молча не проверяется.
+      # Платформенный API (gateway.*) — модули из чекаута Hermes, поэтому его корень идёт
+      # на PYTHONPATH. Внутреннее окружение установщика не используем: его расположение
+      # зависит от версии установщика, а тестам нужны только gateway.* и их прямые
+      # зависимости (pyyaml + websockets).
       - name: Hermes Agent (платформенный API)
         run: |
           DIR="$HOME/.hermes/hermes-agent"
@@ -48,20 +49,15 @@ jobs:
             curl -fsSL https://hermes-agent.nousresearch.com/install.sh \
               | bash -s -- --non-interactive --skip-browser --skip-computer-use
           fi
-          PY="$DIR/venv/bin/python"
-          if [ ! -x "$PY" ]; then
-            echo "::error::окружение Hermes не найдено: $PY"
-            exit 1
-          fi
-          echo "HERMES_PY=$PY" >> "$GITHUB_ENV"
-          "$PY" -c "import websockets" 2>/dev/null \
-            || "$PY" -m pip install -q "websockets>=12"
-          # Проверка платформенного API обязательна: без неё часть тестов проходит «мимо».
-          "$PY" -c "import gateway.config, gateway.platform_registry; print('Hermes API подключён')"
+          echo "HERMES_DIR=$DIR" >> "$GITHUB_ENV"
+          # Проверка обязательна: без неё часть тестов проходит «мимо» платформенного API.
+          PYTHONPATH="$DIR" python -c "import gateway.config, gateway.platform_registry; print('Hermes API подключён')"
 
       - name: Тесты протокола и адаптера
+        env:
+          PYTHONPATH: ${{ env.HERMES_DIR }}
         run: |
-          "$HERMES_PY" -m unittest discover -s tests -v
+          python -m unittest discover -s tests -v
 
       - name: Типчек TypeScript SDK
         run: |
