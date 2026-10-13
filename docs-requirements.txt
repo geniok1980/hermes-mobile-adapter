@@ -7,3 +7,4 @@
 #
 # Документация: https://squidfunk.github.io/mkdocs-material/
 mkdocs-material>=9.5
+mkdocs-static-i18n>=1.2   # двуязычный сайт: русский (по умолчанию) + английский под /en/

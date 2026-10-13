@@ -42,6 +42,40 @@ theme:
     - search.highlight
 
 plugins:
+  # Двуязычный сайт: русский — язык по умолчанию (адреса не меняются), английский — под /en/.
+  # Страницы перевода лежат рядом: <page>.en.md. Непереведённые показывают русский текст.
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: ru
+          default: true
+          name: Русский
+        - locale: en
+          name: English
+          nav_translations:
+            Главная: Home
+            Быстрый старт: Quickstart
+            Начало: Getting started
+            Передача разработчику: Handing off to a developer
+            Владельцу агента: For the agent owner
+            Установка адаптера: Installing the adapter
+            Как всё устроено: How it works
+            Протокол v1: Protocol v1
+            Интерфейс приложения: App UI
+            Безопасность: Security
+            Справочник SDK: SDK reference
+            Обзор: Reference overview
+            Руководства: Guides
+            Как это встроить (обзор): Integration overview
+            Веб: Web
+            Рецепты (cookbook): Cookbook
+            Чек-лист приёмки: Acceptance checklist
+            Диагностика и FAQ: Troubleshooting and FAQ
+            Внутреннее: Internal
+            Аудит возможностей: Capability audit
   - search:
       lang: ru
 
@@ -71,7 +105,7 @@ nav:
       - Передача разработчику: quickstart/handover.md
       - Владельцу агента: host/index.md
       - Установка адаптера: host/install.md
-  - concepts.md
+  - Как всё устроено: concepts.md
   - Протокол v1: protocol/index.md
   - Интерфейс приложения: ui/index.md
   - Безопасность: security.md

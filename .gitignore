@@ -25,3 +25,6 @@ node_modules/
 site/
 site-docs/site/
 *.tgz
+
+# Окружение сборки документации (создаётся scripts/build-docs.sh)
+.docs-venv/

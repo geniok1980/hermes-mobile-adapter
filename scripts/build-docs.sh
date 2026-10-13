@@ -18,9 +18,15 @@ VENV="${DOCS_VENV:-$ROOT/.docs-venv}"
 
 if [ ! -x "$VENV/bin/mkdocs" ]; then
   echo "→ создаю виртуальное окружение документации в $VENV"
-  python3 -m venv "$VENV"
-  "$VENV/bin/pip" install --quiet --upgrade pip
-  "$VENV/bin/pip" install --quiet -r docs-requirements.txt
+  # На хосте может не быть ensurepip (python3 -m venv не работает) — тогда берём uv.
+  if command -v uv >/dev/null 2>&1; then
+    uv venv "$VENV" --python 3.12
+    uv pip install --python "$VENV/bin/python" -r docs-requirements.txt
+  else
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install --quiet --upgrade pip
+    "$VENV/bin/pip" install --quiet -r docs-requirements.txt
+  fi
 fi
 
 case "$MODE" in
