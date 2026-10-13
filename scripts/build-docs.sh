@@ -35,15 +35,19 @@ case "$MODE" in
     exec "$VENV/bin/mkdocs" serve --dev-addr 127.0.0.1:8010
     ;;
   build)
-    "$VENV/bin/mkdocs" build -d site
+    python3 scripts/check-docs.py
+    "$VENV/bin/mkdocs" build -d site --strict
     echo "→ статика собрана в site/"
     ;;
   check)
+    python3 scripts/check-docs.py
     "$VENV/bin/mkdocs" build -d site --strict
     COUNT=$(find site -name '*.html' | wc -l)
-    MISSING=$(grep -rl "404" site/index.html 2>/dev/null | wc -l || true)
-    echo "→ страниц собрано: $COUNT"
+    RU=$(find site -name 'index.html' -not -path 'site/en/*' | wc -l)
+    EN=$(find site/en -name 'index.html' | wc -l)
+    echo "→ страниц собрано: $COUNT (русских $RU, английских $EN)"
     test "$COUNT" -gt 5 || { echo "ошибка: страниц слишком мало — проверьте mkdocs.yml"; exit 1; }
+    test "$EN" -gt 5 || { echo "ошибка: английская ветка не собралась — проверьте mkdocs.yml"; exit 1; }
     echo "→ проверка пройдена"
     ;;
   *)
