@@ -1,15 +1,22 @@
 name: tests
 
+# Прогоняется, когда меняется код адаптера, SDK или сами тесты: правки только в
+# документации проверяет workflow docs.
 on:
   push:
     branches: [main]
+    paths:
+      - 'adapter/**'
+      - 'sdk/**'
+      - 'tests/**'
+      - '.github/workflows/tests.yml'
   pull_request:
   workflow_dispatch:
 
 jobs:
   adapter-tests:
     # Тесты поднимают настоящий WebSocket-сервер адаптера и требуют Hermes Agent
-    # (платформенный API: gateway.platforms.*). Ставим Hermes из публичного репозитория.
+    # (платформенный API: gateway.*).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,18 +28,40 @@ jobs:
       - name: Зависимости
         run: |
           python -m pip install --upgrade pip
-          pip install websockets>=12 pytest
+          pip install "websockets>=12"
 
-      - name: Hermes Agent (для платформенного API)
+      - name: Кэш установки Hermes Agent
+        uses: actions/cache@v4
+        with:
+          path: ~/.hermes/hermes-agent
+          key: hermes-agent-${{ runner.os }}-${{ hashFiles('.github/workflows/tests.yml') }}
+          restore-keys: |
+            hermes-agent-${{ runner.os }}-
+
+      # Установщик Hermes делает editable-установку пакета hermes_agent в собственное
+      # окружение. Тесты поэтому идут питоном ЭТОГО окружения: с системным интерпретатором
+      # `import gateway` не находится, и часть тестов молча не проверяется.
+      - name: Hermes Agent (платформенный API)
         run: |
-          if [ ! -d /usr/local/lib/hermes-agent ]; then
-            curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+          DIR="$HOME/.hermes/hermes-agent"
+          if [ ! -d "$DIR/gateway" ]; then
+            curl -fsSL https://hermes-agent.nousresearch.com/install.sh \
+              | bash -s -- --non-interactive --skip-browser --skip-computer-use
           fi
-          python -c "import gateway.platforms.base as b; print('Hermes API:', b.__file__)" \
-            || echo "Hermes недоступен — тесты протокола всё равно пройдут"
+          PY="$DIR/venv/bin/python"
+          if [ ! -x "$PY" ]; then
+            echo "::error::окружение Hermes не найдено: $PY"
+            exit 1
+          fi
+          echo "HERMES_PY=$PY" >> "$GITHUB_ENV"
+          "$PY" -c "import websockets" 2>/dev/null \
+            || "$PY" -m pip install -q "websockets>=12"
+          # Проверка платформенного API обязательна: без неё часть тестов проходит «мимо».
+          "$PY" -c "import gateway.config, gateway.platform_registry; print('Hermes API подключён')"
 
       - name: Тесты протокола и адаптера
-        run: python -m unittest discover -s tests -v
+        run: |
+          "$HERMES_PY" -m unittest discover -s tests -v
 
       - name: Типчек TypeScript SDK
         run: |
