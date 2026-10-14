@@ -46,7 +46,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:  # обычная загрузка как пакет плагина
     from . import protocol as proto
@@ -196,6 +196,11 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 from gateway.platform_registry import platform_registry
                 max_len = platform_registry.get(PLATFORM_NAME).max_message_length
         self.max_message_length = int(max_len or proto.DEFAULT_CHUNK_LIMIT)
+        # Каталог команд: по умолчанию отдаём только по запросу приложения ({t:"commands"}),
+        # чтобы поток кадров не менялся для уже выпущенных приложений. Автоматическую
+        # отправку сразу после ready можно включить: MOBILE_CATALOG_AFTER_READY=1.
+        raw_catalog = _env_or_extra(extra, "MOBILE_CATALOG_AFTER_READY", "catalog_after_ready", False)
+        self.catalog_after_ready = str(raw_catalog).strip().lower() in ("1", "true", "yes", "on")
 
         self.hello_timeout = float(extra.get("hello_timeout", DEFAULT_HELLO_TIMEOUT) or DEFAULT_HELLO_TIMEOUT)
         self.typing_idle_seconds = float(extra.get("typing_idle_seconds", DEFAULT_TYPING_IDLE_SECONDS))
@@ -335,12 +340,18 @@ class HermesMobileAdapter(BasePlatformAdapter):
                         "media_in": list(proto.INBOUND_MEDIA_KINDS),
                         "media_out": list(proto.OUTBOUND_MEDIA_KINDS),
                         "prompts": list(proto.PROMPT_KINDS),
+                        "commands": True,          # умеем отдавать каталог команд агента
+                        "models": True,            # умеем отдавать список моделей для выбора
                         "edit": True,               # приложение умеет править сообщение по id (стриминг)
                         "max_media_bytes": proto.MAX_MEDIA_BYTES,
                         "max_text_chars": proto.MAX_TEXT_CHARS,
                     },
                 },
             )
+            # Каталог команд сразу после ready — только если так настроено (issue #23):
+            # по умолчанию приложение само присылает {t:"commands"}.
+            if self.catalog_after_ready:
+                await self._send_command_catalog(device)
             logger.info("hermes-mobile: device %s (%s) connected", device.device_id, device.display_name())
 
             async for raw in websocket:
@@ -386,6 +397,10 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 await self._on_prompt_response(device, frame)
             elif kind == proto.C_ACK:
                 return
+            elif kind == proto.C_COMMANDS:
+                await self._send_command_catalog(device)
+            elif kind == proto.C_MODELS:
+                await self._send_model_options(device)
             elif kind == proto.C_HELLO:
                 raise proto.ProtocolError(proto.E_BAD_FRAME, i18n.t("err.repeated_hello"))
             else:
@@ -1204,6 +1219,25 @@ class HermesMobileAdapter(BasePlatformAdapter):
             logger.info("hermes-mobile: could not send a frame to device %s — %s", device.device_id, exc)
             return False
 
+    async def _send_command_catalog(self, device: MobileDevice) -> None:
+        """Отдаёт каталог команд из реестра ядра (issue #23). Пусто — кадр не шлём."""
+        catalog = await asyncio.to_thread(collect_command_catalog)
+        if not catalog:
+            logger.info(
+                "hermes-mobile: каталог команд недоступен — приложение останется на снимке сборки",
+            )
+            return
+        await self._push(device, proto.commands_frame(catalog))
+
+    async def _send_model_options(self, device: MobileDevice) -> None:
+        """Отдаёт список моделей для выбора из инвентаря ядра (issue #23)."""
+        options = await asyncio.to_thread(collect_model_options)
+        if options is None:
+            logger.info("hermes-mobile: список моделей недоступен — приложение предложит ввод вручную")
+            return
+        provider, current, models = options
+        await self._push(device, proto.models_frame(provider, current, models))
+
     async def _reject(self, websocket, code: str, message: str) -> None:
         with contextlib.suppress(Exception):
             await websocket.send(proto.dumps({"t": proto.S_ERROR, "code": code, "message": message, "fatal": True}))
@@ -1277,6 +1311,87 @@ def _env_enablement() -> Optional[dict]:
         home_default=home_device or None,
     )
     return {"token": token, **seed}
+
+
+def _model_name(item: Any) -> str:
+    """Название модели из строки инвентаря: строка, либо словарь с name/id/model."""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for key in ("name", "id", "model"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def collect_command_catalog() -> List[Dict[str, Any]]:
+    """Каталог команд из реестра ядра: имена, аргументы, описания, категории.
+
+    Ничего не выдумываем: если реестр недоступен (другая сборка ядра), возвращаем пусто —
+    приложение тогда работает на вшитом снимке (issue #19).
+    """
+    try:
+        from hermes_cli.commands import COMMAND_REGISTRY
+    except Exception as exc:  # noqa: BLE001 — каталог не критичен для разговора
+        logger.debug("hermes-mobile: реестр команд недоступен — %s", exc)
+        return []
+
+    catalog: List[Dict[str, Any]] = []
+    for command in COMMAND_REGISTRY:
+        # Команды только для терминала в мессенджере не работают — не показываем.
+        if getattr(command, "cli_only", False):
+            continue
+        try:
+            description = command.describe()
+        except Exception:  # noqa: BLE001 — описания бывают локализованными
+            description = str(getattr(command, "description", "") or "")
+        catalog.append(
+            {
+                "name": str(getattr(command, "name", "") or ""),
+                "args": str(getattr(command, "args_hint", "") or ""),
+                "description": description,
+                "category": str(getattr(command, "category", "") or ""),
+                "aliases": [str(alias) for alias in (getattr(command, "aliases", ()) or ())],
+            }
+        )
+    return [item for item in catalog if item["name"]]
+
+
+def collect_model_options() -> Optional[Tuple[str, str, List[str]]]:
+    """Модели для выбора из инвентаря ядра: (провайдер, действующая модель, названия).
+
+    Тот же источник, что у десктопа (``/api/model/options``): каталог провайдера с диска,
+    без обращения к сети — тяжёлую работу инвентарь делает в фоне.
+    """
+    try:
+        from hermes_cli.inventory import build_model_options_payload, load_picker_context
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes-mobile: инвентарь моделей недоступен — %s", exc)
+        return None
+
+    payload = build_model_options_payload(load_picker_context(), include_unconfigured=True)
+    provider = str(payload.get("provider") or "")
+    current = str(payload.get("model") or "")
+
+    names: List[str] = []
+    seen = set()
+    for row in payload.get("providers") or []:
+        if not isinstance(row, dict):
+            continue
+        # Пока показываем модели действующего провайдера: переключение провайдеров —
+        # отдельный шаг, в кадре едет один провайдер.
+        if provider and str(row.get("slug") or "") != provider:
+            continue
+        for item in row.get("models") or []:
+            name = _model_name(item)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    if not names:
+        return None
+    return provider, current, names
 
 
 async def standalone_send(

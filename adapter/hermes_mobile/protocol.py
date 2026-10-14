@@ -47,6 +47,8 @@ C_ACK = "ack"            # {t, id} — приложение подтвердил
 C_DELIVER = "deliver"    # {t, id, target, text} — служебная доставка (cron → устройство)
 C_PROMPT = "prompt"      # {t, prompt_id, option_id, text?} — ответ на карточку-вопрос
 C_MEDIA = "media"        # {t, id, kind, mime, filename?, caption?, data, part?, parts?} — медиа от приложения
+C_COMMANDS = "commands"  # {t} — просьба отдать каталог команд агента
+C_MODELS = "models"      # {t} — просьба отдать список моделей для выбора
 
 # ── Типы кадров: сервер → клиент ─────────────────────────────────────────────
 S_READY = "ready"        # {t, v, session, device, avatar_url, capabilities}
@@ -60,6 +62,8 @@ S_DELIVERED = "delivered"  # {t, id, device} — подтверждение сл
 S_PROMPT = "prompt"      # {t, id, kind, text, options:[{id,label,style?}], session, timeout_seconds}
 S_PROMPT_DONE = "prompt_done"  # {t, id, option_id?, expired?} — карточка закрыта
 S_MEDIA = "media"        # {t, id, kind, mime, filename, caption?, data, part, parts, final, size}
+S_COMMANDS = "commands"  # {t, v, commands:[{name, args, description, category, aliases}]} — каталог команд от агента
+S_MODELS = "models"      # {t, v, provider, current, models:[…]} — модели для выбора (как у десктопа: /api/model/options)
 
 AVATAR_STATES = ("idle", "thinking", "speaking")
 
@@ -432,6 +436,26 @@ def option_allowed(kind: str, option_id: str) -> bool:
     if kind == P_CLARIFY:
         return option == CLARIFY_OTHER or (len(option) > 1 and option[0] == "c" and option[1:].isdigit())
     return False
+
+
+def commands_frame(commands: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Кадр каталога команд: приложение наполняет окно команд данными агента."""
+    return {
+        "t": S_COMMANDS,
+        "v": PROTOCOL_VERSION,
+        "commands": [dict(item) for item in commands],
+    }
+
+
+def models_frame(provider: str, current: str, models: Iterable[str]) -> Dict[str, Any]:
+    """Кадр списка моделей для выбора: провайдер, действующая модель, названия."""
+    return {
+        "t": S_MODELS,
+        "v": PROTOCOL_VERSION,
+        "provider": str(provider or ""),
+        "current": str(current or ""),
+        "models": [str(name) for name in models],
+    }
 
 
 def _coerce_int(value: Any, default: int) -> int:
