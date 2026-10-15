@@ -1402,6 +1402,7 @@ async def standalone_send(
     thread_id: Optional[str] = None,
     media_files: Optional[List[str]] = None,
     force_document: bool = False,
+    caption: Optional[str] = None,
 ) -> dict:
     """``standalone_sender_fn``: доставка без шлюза в этом процессе.
 
@@ -1450,6 +1451,7 @@ async def standalone_send(
                     )
                 )
             missing: List[str] = []
+            media_caption = (caption or "").strip()
             for descriptor in list(media_files or []):
                 # Ядро передаёт вложение парой (путь, признак голоса), а не строкой. Раньше
                 # путь не распаковывался: Path(str(('путь', False))) файла не находил, и
@@ -1488,7 +1490,9 @@ async def standalone_send(
                             "t": proto.C_DELIVER,
                             "id": f"{message_id}:media:{file_path.name}",
                             "target": chat_id,
-                            "text": "" if force_document or kind == "document" else message,
+                            "text": media_caption
+                            if media_caption and not message.strip()
+                            else ("" if force_document or kind == "document" else message),
                             "media": {
                                 "kind": "document" if force_document else kind,
                                 "mime": proto.guess_mime(file_path.name),

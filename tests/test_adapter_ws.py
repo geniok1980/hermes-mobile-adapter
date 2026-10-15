@@ -391,8 +391,10 @@ class TestOutbound(BaseWS):
 
             for attachment in ((path, False), path):
                 with self.subTest(attachment=attachment):
+                    # Ядро зовёт отправителя с подписью и признаком документа — повторяем это.
                     result = await mobile_adapter.standalone_send(
-                        config, "dev-1", "Заметка во вложении.", media_files=[attachment]
+                        config, "dev-1", "Заметка во вложении.", media_files=[attachment],
+                        caption="Заметка во вложении.", force_document=False,
                     )
 
                     self.assertTrue(result.get("success"), result)
