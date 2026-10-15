@@ -377,24 +377,31 @@ class TestOutbound(BaseWS):
         self.assertEqual(frame["text"], "сообщение из cron")
 
     async def test_standalone_send_delivers_markdown_attachment(self):
-        """Файл .md уходит приложению кадром media (kind=document, mime=text/markdown)."""
+        """Файл .md уходит приложению кадром media (kind=document, mime=text/markdown).
+
+        Вложение передаём ПАРОЙ (путь, признак голоса) — именно так его передаёт ядро.
+        Раньше отправитель ждал строку: путь не распаковывался, файл «не находился»
+        и вложение молча не уходило.
+        """
         config = PlatformConfig(enabled=True, extra={"token": TOKEN, "host": "127.0.0.1", "port": self.port, "path": "/ws"})
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "заметка.md")
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("# Привет\n")
 
-            result = await mobile_adapter.standalone_send(
-                config, "dev-1", "Заметка во вложении.", media_files=[path]
-            )
+            for attachment in ((path, False), path):
+                with self.subTest(attachment=attachment):
+                    result = await mobile_adapter.standalone_send(
+                        config, "dev-1", "Заметка во вложении.", media_files=[attachment]
+                    )
 
-            self.assertTrue(result.get("success"), result)
-            frame = await self.recv_frame(self.websocket, proto.S_MEDIA)
-            self.assertEqual(frame["kind"], "document")
-            self.assertEqual(frame["mime"], "text/markdown")
-            self.assertEqual(frame["filename"], "заметка.md")
-            self.assertTrue(frame["final"])
-            self.assertEqual(base64.b64decode(frame["data"]).decode("utf-8"), "# Привет\n")
+                    self.assertTrue(result.get("success"), result)
+                    frame = await self.recv_frame(self.websocket, proto.S_MEDIA)
+                    self.assertEqual(frame["kind"], "document")
+                    self.assertEqual(frame["mime"], "text/markdown")
+                    self.assertEqual(frame["filename"], "заметка.md")
+                    self.assertTrue(frame["final"])
+                    self.assertEqual(base64.b64decode(frame["data"]).decode("utf-8"), "# Привет\n")
 
     async def test_standalone_send_reports_unavailable_attachment(self):
         """Недоступный файл — ошибка, а не «успех»: иначе агент считает вложение отправленным."""
@@ -402,12 +409,14 @@ class TestOutbound(BaseWS):
         missing = "/нет-такой-папки/заметка.md"
 
         result = await mobile_adapter.standalone_send(
-            config, "dev-1", "Заметка во вложении.", media_files=[missing]
+            config, "dev-1", "Заметка во вложении.", media_files=[(missing, False)]
         )
 
         self.assertFalse(result.get("success"))
         self.assertIn("error", result)
         self.assertIn("заметка.md", result["error"])
+        # В сообщении — путь, а не repr пары.
+        self.assertNotIn("False", result["error"])
         # Текст уходит (он не зависит от файла), а вложения быть не должно.
         frame = await self.recv_frame(self.websocket, proto.S_MESSAGE)
         self.assertEqual(frame["text"], "Заметка во вложении.")

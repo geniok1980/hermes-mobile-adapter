@@ -1450,22 +1450,38 @@ async def standalone_send(
                     )
                 )
             missing: List[str] = []
-            for path in list(media_files or []):
-                file_path = Path(str(path))
+            for descriptor in list(media_files or []):
+                # Ядро передаёт вложение парой (путь, признак голоса), а не строкой. Раньше
+                # путь не распаковывался: Path(str(('путь', False))) файла не находил, и
+                # вложение молча не уходило.
+                if isinstance(descriptor, (list, tuple)):
+                    raw_path = descriptor[0] if descriptor else ""
+                    is_voice = bool(descriptor[1]) if len(descriptor) > 1 else False
+                else:
+                    raw_path = descriptor
+                    is_voice = False
+                file_path = Path(str(raw_path))
                 if not file_path.is_file():
                     # Вложение нельзя прочитать из процесса отправки. Раньше оно молча
                     # пропускалось, а отправитель докладывал успех: агент считал файл
                     # отправленным, человек его не получал (и причины не видел никто).
                     # Теперь честная ошибка — агент может повторить с доступным путём.
                     logger.warning(
-                        "hermes-mobile: attachment %s is unavailable to the sending process", path
+                        "hermes-mobile: attachment %s is unavailable to the sending process",
+                        raw_path,
                     )
-                    missing.append(str(path))
+                    missing.append(str(raw_path))
                     continue
                 payload = file_path.read_bytes()
                 if len(payload) > proto.MAX_MEDIA_BYTES:
                     return {"error": f"attachment {file_path.name} exceeds {proto.MAX_MEDIA_BYTES // (1024 * 1024)} MB"}
-                kind = "image" if proto.guess_mime(file_path.name).startswith("image/") else "document"
+                mime = proto.guess_mime(file_path.name)
+                if mime.startswith("image/"):
+                    kind = "image"
+                elif is_voice and mime.startswith("audio/"):
+                    kind = "voice"
+                else:
+                    kind = "document"
                 await websocket.send(
                     proto.dumps(
                         {
