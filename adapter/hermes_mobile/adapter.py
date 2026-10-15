@@ -1449,10 +1449,18 @@ async def standalone_send(
                         }
                     )
                 )
+            missing: List[str] = []
             for path in list(media_files or []):
                 file_path = Path(str(path))
                 if not file_path.is_file():
-                    logger.warning("hermes-mobile: attachment %s is unavailable — skipping", path)
+                    # Вложение нельзя прочитать из процесса отправки. Раньше оно молча
+                    # пропускалось, а отправитель докладывал успех: агент считал файл
+                    # отправленным, человек его не получал (и причины не видел никто).
+                    # Теперь честная ошибка — агент может повторить с доступным путём.
+                    logger.warning(
+                        "hermes-mobile: attachment %s is unavailable to the sending process", path
+                    )
+                    missing.append(str(path))
                     continue
                 payload = file_path.read_bytes()
                 if len(payload) > proto.MAX_MEDIA_BYTES:
@@ -1474,6 +1482,14 @@ async def standalone_send(
                         }
                     )
                 )
+            if missing:
+                return {
+                    "error": (
+                        "attachment was not delivered (the message text was): the file is not "
+                        f"available to the sending process — {', '.join(missing)}. If the file "
+                        "lives outside the agent home (HERMES_HOME), put a copy there and resend."
+                    )
+                }
             return {"success": True, "message_id": message_id}
     except Exception as exc:
         return {"error": f"gateway unreachable ({exc.__class__.__name__}: {exc})"}
