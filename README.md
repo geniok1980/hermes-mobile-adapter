@@ -151,3 +151,12 @@ python -m unittest discover -s tests -v
 ## Лицензия
 
 MIT — см. [`LICENSE`](LICENSE).
+
+## Тесты
+
+```bash
+scripts/run-tests.sh            # 130 тестов: протокол, возможности, каталог, устойчивость, SDK
+```
+
+Скрипт сам подставляет путь к ядру Hermes (тестам нужен `hermes_yaml` из каталога ядра) и
+прогоняет файлы по одному: `unittest discover` падает на импортах между файлами.
