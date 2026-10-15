@@ -103,6 +103,36 @@ handlers: {
 
 Хелперы `bytesToBase64` / `base64ToBytes` и константа `MEDIA_CHUNK_BYTES` экспортируются.
 
+## Каталог команд и список моделей
+
+Агент отдаёт их отдельными кадрами, а не текстом ответа — так список не попадает в переписку.
+Признаки есть в `ready` (`capabilities.commands` / `capabilities.models`): если агент их не
+объявляет (старый шлюз), запрашивайте текстом, как раньше.
+
+```ts
+const client = new HermesClient({
+  url: 'wss://hermes-go.com/chef-nova-ws',
+  token,
+  device: { id: 'phone-1', name: 'Телефон', platform: 'android', appVersion: '1.0.0' },
+  handlers: {
+    onReady: ready => {
+      if (ready.capabilities.commands) client.requestCommands();
+      if (ready.capabilities.models) client.requestModels();
+    },
+    onCommands: payload => {
+      // payload: { version, commands: [{ name, args, description, category, aliases }] }
+      console.log(payload.commands.length);
+    },
+    onModels: payload => {
+      // payload: { version, provider, current, models: [...] }
+      console.log(payload.provider, payload.current, payload.models.length);
+    },
+  },
+});
+
+client.connect();
+```
+
 ## Что внутри
 
 Авторизация токеном, переподключение с экспоненциальной паузой, обработка отказа в
@@ -110,8 +140,8 @@ handlers: {
 (`chunk.index/total`, `final`), идемпотентные `id`, игнорирование неизвестных кадров.
 
 Типы: `ReadyPayload`, `AgentMessage`, `PromptPayload`, `PromptOption`, `PromptDonePayload`,
-`MediaPayload`, `MediaSource`, `ProtocolError`, `AvatarState`, `ConnectionState`,
-`HermesClientHandlers`.
+`MediaPayload`, `MediaSource`, `CommandsPayload`, `CommandEntry`, `ModelsPayload`,
+`ProtocolError`, `AvatarState`, `ConnectionState`, `HermesClientHandlers`.
 
 Работа с историей и UI — на стороне приложения: SDK не хранит состояние, только транспорт.
 Примеры: `examples/react-native/` и `examples/web/`.

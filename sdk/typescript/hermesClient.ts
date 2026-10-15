@@ -34,6 +34,10 @@ export interface ReadyPayload {
     media_in?: string[];
     media_out?: string[];
     prompts?: string[];
+    /** Умеет отдавать каталог команд агента (кадр `commands`). */
+    commands?: boolean;
+    /** Умеет отдавать список моделей для выбора (кадр `models`). */
+    models?: boolean;
     edit?: boolean;
     max_media_bytes?: number;
     max_text_chars?: number;
@@ -90,6 +94,29 @@ export interface MediaPayload {
   reply_to?: string;
 }
 
+/** Команда агента для списка команд в приложении (кадр `commands`). */
+export interface CommandEntry {
+  name: string;
+  args: string;
+  description: string;
+  category: string;
+  aliases: string[];
+}
+
+/** Каталог команд агента: `{t:"commands", v, commands:[…]}`. */
+export interface CommandsPayload {
+  version: number;
+  commands: CommandEntry[];
+}
+
+/** Список моделей для выбора: `{t:"models", v, provider, current, models:[…]}`. */
+export interface ModelsPayload {
+  version: number;
+  provider: string;
+  current: string;
+  models: string[];
+}
+
 export interface ProtocolError {
   code: string;
   message: string;
@@ -109,6 +136,10 @@ export interface HermesClientHandlers {
   onPrompt?: (prompt: PromptPayload) => void;
   onPromptDone?: (done: PromptDonePayload) => void;
   onMedia?: (media: MediaPayload) => void;
+  /** Пришёл каталог команд агента (ответ на `requestCommands`). */
+  onCommands?: (payload: CommandsPayload) => void;
+  /** Пришёл список моделей для выбора (ответ на `requestModels`). */
+  onModels?: (payload: ModelsPayload) => void;
   onError?: (error: ProtocolError) => void;
 }
 
@@ -223,6 +254,16 @@ export class HermesClient {
 
   ping(): void {
     this.send({ t: 'ping', ts: Date.now() });
+  }
+
+  /** Просит у агента каталог команд — ответ придёт в `onCommands`. */
+  requestCommands(): void {
+    this.send({ t: 'commands' });
+  }
+
+  /** Просит у агента список моделей — ответ придёт в `onModels`. */
+  requestModels(): void {
+    this.send({ t: 'models' });
   }
 
   // ── карточки-вопросы ──────────────────────────────────────────────────────
@@ -399,6 +440,12 @@ export class HermesClient {
         if (complete) this.handlers.onMedia?.(complete);
         return;
       }
+      case 'commands':
+        this.handlers.onCommands?.(parseCommands(frame));
+        return;
+      case 'models':
+        this.handlers.onModels?.(parseModels(frame));
+        return;
       case 'avatar':
         this.handlers.onAvatar?.((frame.state as AvatarState) ?? 'idle');
         return;
@@ -491,6 +538,36 @@ export function makeId(): string {
 }
 
 // ── помощники медиа (без зависимостей, работают и в браузере, и в Node) ────────
+
+/** Разбирает кадр `commands`: незнакомые поля не роняют клиента. */
+function parseCommands(frame: Record<string, unknown>): CommandsPayload {
+  const list = Array.isArray(frame.commands) ? frame.commands : [];
+  return {
+    version: Number(frame.v ?? 1),
+    commands: list.map(raw => {
+      const item = (raw ?? {}) as Record<string, unknown>;
+      const aliases = Array.isArray(item.aliases) ? item.aliases : [];
+      return {
+        name: String(item.name ?? ''),
+        args: String(item.args ?? ''),
+        description: String(item.description ?? ''),
+        category: String(item.category ?? ''),
+        aliases: aliases.map(alias => String(alias)),
+      };
+    }),
+  };
+}
+
+/** Разбирает кадр `models`: список моделей и текущая. */
+function parseModels(frame: Record<string, unknown>): ModelsPayload {
+  const list = Array.isArray(frame.models) ? frame.models : [];
+  return {
+    version: Number(frame.v ?? 1),
+    provider: String(frame.provider ?? ''),
+    current: String(frame.current ?? ''),
+    models: list.map(model => String(model)),
+  };
+}
 
 function parseOptions(raw: unknown): PromptOption[] {
   if (!Array.isArray(raw)) return [];

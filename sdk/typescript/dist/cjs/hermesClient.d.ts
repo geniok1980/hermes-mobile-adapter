@@ -32,6 +32,10 @@ export interface ReadyPayload {
         media_in?: string[];
         media_out?: string[];
         prompts?: string[];
+        /** Умеет отдавать каталог команд агента (кадр `commands`). */
+        commands?: boolean;
+        /** Умеет отдавать список моделей для выбора (кадр `models`). */
+        models?: boolean;
         edit?: boolean;
         max_media_bytes?: number;
         max_text_chars?: number;
@@ -82,6 +86,26 @@ export interface MediaPayload {
     url?: string;
     reply_to?: string;
 }
+/** Команда агента для списка команд в приложении (кадр `commands`). */
+export interface CommandEntry {
+    name: string;
+    args: string;
+    description: string;
+    category: string;
+    aliases: string[];
+}
+/** Каталог команд агента: `{t:"commands", v, commands:[…]}`. */
+export interface CommandsPayload {
+    version: number;
+    commands: CommandEntry[];
+}
+/** Список моделей для выбора: `{t:"models", v, provider, current, models:[…]}`. */
+export interface ModelsPayload {
+    version: number;
+    provider: string;
+    current: string;
+    models: string[];
+}
 export interface ProtocolError {
     code: string;
     message: string;
@@ -100,6 +124,10 @@ export interface HermesClientHandlers {
     onPrompt?: (prompt: PromptPayload) => void;
     onPromptDone?: (done: PromptDonePayload) => void;
     onMedia?: (media: MediaPayload) => void;
+    /** Пришёл каталог команд агента (ответ на `requestCommands`). */
+    onCommands?: (payload: CommandsPayload) => void;
+    /** Пришёл список моделей для выбора (ответ на `requestModels`). */
+    onModels?: (payload: ModelsPayload) => void;
     onError?: (error: ProtocolError) => void;
 }
 export interface DeviceInfo {
@@ -154,6 +182,10 @@ export declare class HermesClient {
     sendTyping(): void;
     acknowledge(messageId: string): void;
     ping(): void;
+    /** Просит у агента каталог команд — ответ придёт в `onCommands`. */
+    requestCommands(): void;
+    /** Просит у агента список моделей — ответ придёт в `onModels`. */
+    requestModels(): void;
     /**
      * Ответ на карточку-вопрос.
      *

@@ -73,6 +73,14 @@ export class HermesClient {
     ping() {
         this.send({ t: 'ping', ts: Date.now() });
     }
+    /** Просит у агента каталог команд — ответ придёт в `onCommands`. */
+    requestCommands() {
+        this.send({ t: 'commands' });
+    }
+    /** Просит у агента список моделей — ответ придёт в `onModels`. */
+    requestModels() {
+        this.send({ t: 'models' });
+    }
     // ── карточки-вопросы ──────────────────────────────────────────────────────
     /**
      * Ответ на карточку-вопрос.
@@ -243,6 +251,12 @@ export class HermesClient {
                     this.handlers.onMedia?.(complete);
                 return;
             }
+            case 'commands':
+                this.handlers.onCommands?.(parseCommands(frame));
+                return;
+            case 'models':
+                this.handlers.onModels?.(parseModels(frame));
+                return;
             case 'avatar':
                 this.handlers.onAvatar?.(frame.state ?? 'idle');
                 return;
@@ -330,6 +344,34 @@ export function makeId() {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 // ── помощники медиа (без зависимостей, работают и в браузере, и в Node) ────────
+/** Разбирает кадр `commands`: незнакомые поля не роняют клиента. */
+function parseCommands(frame) {
+    const list = Array.isArray(frame.commands) ? frame.commands : [];
+    return {
+        version: Number(frame.v ?? 1),
+        commands: list.map(raw => {
+            const item = (raw ?? {});
+            const aliases = Array.isArray(item.aliases) ? item.aliases : [];
+            return {
+                name: String(item.name ?? ''),
+                args: String(item.args ?? ''),
+                description: String(item.description ?? ''),
+                category: String(item.category ?? ''),
+                aliases: aliases.map(alias => String(alias)),
+            };
+        }),
+    };
+}
+/** Разбирает кадр `models`: список моделей и текущая. */
+function parseModels(frame) {
+    const list = Array.isArray(frame.models) ? frame.models : [];
+    return {
+        version: Number(frame.v ?? 1),
+        provider: String(frame.provider ?? ''),
+        current: String(frame.current ?? ''),
+        models: list.map(model => String(model)),
+    };
+}
 function parseOptions(raw) {
     if (!Array.isArray(raw))
         return [];
