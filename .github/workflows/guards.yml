@@ -1,0 +1,37 @@
+name: guards
+
+# Структурные проверки репозитория: одинаковы для всех наших проектов и не зависят от стека.
+# Ставится даже туда, где уже есть свои тесты и линты: они отвечают на «работает ли код»,
+# а эти стражи — на «не просочилось ли в репозиторий лишнее».
+#
+# Настройка под проект — файл .ci-ignore в корне: строки «проверка|маска пути|причина».
+# Осознанное исключение в коде — отметка «# ci-allow: причина» в самой строке.
+
+on:
+  push:
+    branches: [main, master, hermesv2]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: guards-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guards:
+    name: Структурные проверки
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Стражи репозитория
+        run: python3 scripts/ci/guards.py
