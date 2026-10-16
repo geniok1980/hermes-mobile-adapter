@@ -119,6 +119,7 @@ nav:
       - Flutter: guides/flutter.md
       - iOS / Swift: guides/ios-swift.md
       - Android / Kotlin: guides/android-kotlin.md
+      - Проверки PR в ядре Hermes: guides/upstream-pr-checks.md
       - Веб: guides/web.md
       - Рецепты (cookbook): guides/cookbook.md
       - Чек-лист приёмки: guides/conformance.md
