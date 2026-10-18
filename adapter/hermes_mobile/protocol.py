@@ -218,6 +218,26 @@ def parse_user(frame: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+def parse_agent(frame: Dict[str, Any]) -> str:
+    """Необязательный выбор агента (профиля) в кадре ``hello``.
+
+    Приложение присылает ``agent`` (или ``profile``), чтобы подключиться к нужному
+    агенту одного шлюза: у диалога и заметок разные профили. Поле необязательное —
+    без него поведение прежнее, к какому агенту попало сообщение, решает шлюз.
+
+    Правило по ``chat_id``: агент участвует в ключе сессии, поэтому диалог и заметки
+    не могут наложиться друг на друга.
+    """
+    raw = frame.get("agent")
+    if raw is None or not str(raw).strip():
+        raw = frame.get("profile")
+    value = str(raw).strip().lower() if raw is not None else ""
+    if not value:
+        return ""
+    value = re.sub(r"[^a-z0-9_.-]+", "-", value).strip("-")
+    return value[:64]
+
+
 # ── Токены ───────────────────────────────────────────────────────────────────
 
 def split_tokens(raw: Optional[str]) -> List[str]:

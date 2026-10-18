@@ -84,6 +84,7 @@ class MobileDevice:
 
     device_id: str
     chat_id: str
+    agent: str = ""
     name: str = ""
     platform: str = ""
     app_version: str = ""
@@ -1157,6 +1158,7 @@ class HermesMobileAdapter(BasePlatformAdapter):
         device = MobileDevice(
             device_id=device_id,
             chat_id=chat_id,
+            agent=proto.parse_agent(frame),
             name=info.get("name", ""),
             platform=info.get("platform", ""),
             app_version=info.get("app_version", ""),
