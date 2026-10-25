@@ -12,6 +12,7 @@ loopback. У агента подменяется только обработчи
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import socket
@@ -331,10 +332,15 @@ class TestOutbound(BaseWS):
         )
         self.assertEqual(len({f["id"] for f in frames}), 1)
 
-    async def test_send_to_offline_device_reports_error(self):
+    async def test_send_to_offline_device_is_queued_not_lost(self):
+        """Ответ офлайн-устройству не теряется: он ждёт переподключения (см. TestOutbox).
+
+        Прежде такой ответ возвращал ошибку device_offline и пропадал: агент ответил,
+        а человек до сторожа так и не увидел ничего.
+        """
         result = await self.adapter.send("mobile:не-подключено", "привет")
-        self.assertFalse(result.success)
-        self.assertEqual(result.error, proto.E_DEVICE_OFFLINE)
+        self.assertTrue(result.success, result.error)
+        self.assertTrue(self.adapter._outbox.get("mobile:не-подключено"))
 
     async def test_typing_indicator(self):
         await self.adapter.send_typing("mobile:dev-1")
@@ -465,3 +471,97 @@ class TestEnvEnablement(BaseWS):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReconnect(BaseWS):
+    """Переподключение того же устройства не должно «глушить» новые ответы.
+
+    Приложение переподключается routinely (уход в фон, смена сети). Сервер закрывает
+    прежнее соединение, но обработчик прежнего соединения завершается ПОЗЖЕ регистрации
+    нового и снимает запись по chat_id — после чего исходящие ответы падают с
+    device_offline, хотя телефон на связи (и агент уже ответил).
+    """
+
+    async def test_reply_reaches_device_after_reconnect(self):
+        await self.adapter.connect()
+
+        first = await websockets.connect(self.url())
+        ready = await self.hello(first)
+        chat_id = ready["session"]
+
+        second = await websockets.connect(self.url())
+        await self.hello(second)  # то же устройство: сервер закрывает first
+
+        # Ждём, пока обработчик первого соединения завершится и снимет регистрацию.
+        for _ in range(60):
+            try:
+                await asyncio.wait_for(first.recv(), timeout=0.05)
+            except websockets.exceptions.ConnectionClosed:
+                break
+            except asyncio.TimeoutError:
+                continue
+        await asyncio.sleep(0.2)
+
+        result = await self.adapter.send(chat_id, "ответ после переподключения")
+        self.assertTrue(result.success, result.error)
+
+        frame = await self.recv_frame(second, proto.S_MESSAGE)
+        self.assertEqual(frame["text"], "ответ после переподключения")
+
+        await second.close()
+        with contextlib.suppress(Exception):
+            await first.close()
+
+
+class TestOutbox(BaseWS):
+    """Ответ, пришедший пока телефон не на связи, не теряется.
+
+    Симптом из жизни: человек наговорил заметку, агент ответил, а приложение так и
+    показывает «записывает…» — соединение в этот момент оборвалось, и ответ ушёл в
+    никуда. Теперь он ждёт переподключения.
+    """
+
+    async def test_send_while_offline_is_delivered_after_reconnect(self):
+        await self.adapter.connect()
+
+        # Отправляем ответ, когда телефон ещё ни разу не подключался.
+        result = await self.adapter.send("mobile:dev-1", "ответ, пока телефон офлайн")
+        self.assertTrue(result.success, result.error)
+
+        async with websockets.connect(self.url()) as websocket:
+            ready = await self.hello(websocket)
+            self.assertEqual(ready["session"], "mobile:dev-1")
+            frame = await self.recv_frame(websocket, proto.S_MESSAGE)
+            self.assertEqual(frame["text"], "ответ, пока телефон офлайн")
+
+    async def test_expired_outbox_is_dropped(self):
+        await self.adapter.connect()
+        await self.adapter.send("mobile:dev-2", "старый ответ")
+        # Сдвигаем время очереди в прошлое больше, чем на срок жизни.
+        for entry in self.adapter._outbox["mobile:dev-2"].values():
+            entry["at"] -= self.adapter.outbox_ttl + 10
+
+        async with websockets.connect(self.url()) as websocket:
+            await self.hello(websocket, device_id="dev-2")
+            with self.assertRaises(asyncio.TimeoutError):
+                await self.recv_frame(websocket, proto.S_MESSAGE, timeout=0.5)
+
+
+class TestOutboxStreaming(BaseWS):
+    """Стриминг при офлайне: человек получает один пузырь с готовым текстом."""
+
+    async def test_offline_edit_replaces_queued_message(self):
+        await self.adapter.connect()
+        first = await self.adapter.send("mobile:dev-3", "Звонок ма")
+        self.assertTrue(first.success)
+
+        edited = await self.adapter.edit_message("mobile:dev-3", first.message_id or "", "Звонок маме в четверг", finalize=True)
+        self.assertTrue(edited.success, edited.error)
+
+        async with websockets.connect(self.url()) as websocket:
+            await self.hello(websocket, device_id="dev-3")
+            frame = await self.recv_frame(websocket, proto.S_MESSAGE)
+            self.assertEqual(frame["text"], "Звонок маме в четверг")
+            # Второго пузыря быть не должно: правка заменила очередь, а не добавила запись.
+            with self.assertRaises(asyncio.TimeoutError):
+                await self.recv_frame(websocket, proto.S_MESSAGE, timeout=0.6)

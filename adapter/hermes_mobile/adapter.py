@@ -73,6 +73,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PATH = "/ws"
 DEFAULT_HELLO_TIMEOUT = 15.0
+DEFAULT_OUTBOX_TTL = 900.0
+DEFAULT_OUTBOX_LIMIT = 20
 DEFAULT_TYPING_IDLE_SECONDS = 3.0
 MAX_OPEN_MEDIA_UPLOADS = 8  # незавершённых многочастных загрузок на устройство
 CLOSE_UNAUTHORIZED = 1008  # policy violation — WebSocket-стандарт для отказа в доступе
@@ -223,6 +225,12 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self.prompt_ttl = float(extra.get("prompt_ttl", proto.DEFAULT_PROMPT_TTL) or proto.DEFAULT_PROMPT_TTL)
         # Сборка больших входящих файлов: "<chat_id>:<message_id>" → части.
         self._media_buffers: Dict[str, Dict[str, Any]] = {}
+        # Недоставленные ответы: телефон отвалился в момент ответа (смена сети, уход в
+        # фон) — ответ не теряем, а отдаём при первом же переподключении этого устройства.
+        # chat_id -> {id сообщения: {"frame": …, "at": time.time()}}
+        self._outbox: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.outbox_ttl = float(extra.get("outbox_ttl", DEFAULT_OUTBOX_TTL) or DEFAULT_OUTBOX_TTL)
+        self.outbox_limit = int(extra.get("outbox_limit", DEFAULT_OUTBOX_LIMIT) or DEFAULT_OUTBOX_LIMIT)
 
     # ── служебное ────────────────────────────────────────────────────────────
 
@@ -354,6 +362,8 @@ class HermesMobileAdapter(BasePlatformAdapter):
             if self.catalog_after_ready:
                 await self._send_command_catalog(device)
             logger.info("hermes-mobile: device %s (%s) connected", device.device_id, device.display_name())
+            # Ответы, не дошедшие пока телефон был не на связи.
+            await self._flush_outbox(device)
 
             async for raw in websocket:
                 await self._dispatch(device, websocket, raw)
@@ -1037,27 +1047,40 @@ class HermesMobileAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Доставляет ответ агента на устройство, нарезая длинный текст на части."""
+        """Доставляет ответ агента на устройство, нарезая длинный текст на части.
+
+        Если телефон в этот момент не на связи (смена сети, уход в фон — обычное дело
+        на мобильной связи), ответ не теряется: кадры кладутся в очередь устройства и
+        уходят при первом же переподключении. Иначе агент отвечает, а человек видит
+        «печатает…» до сторожевого таймера и решает, что приложение зависло.
+        """
         session = await self._session_for(chat_id)
-        if session is None:
-            return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
         chunks = proto.chunk_text(content, self.max_message_length) or [""]
         message_id = uuid.uuid4().hex
-        await self._set_avatar(session, "speaking")
         total = len(chunks)
-        for index, chunk in enumerate(chunks):
-            ok = await self._push(
-                session,
-                {
-                    "t": proto.S_MESSAGE,
-                    "id": message_id,
-                    "text": chunk,
-                    "chunk": {"index": index, "total": total},
-                    "final": index == total - 1,
-                },
-            )
+        frames = [
+            {
+                "t": proto.S_MESSAGE,
+                "id": message_id,
+                "text": chunk,
+                "chunk": {"index": index, "total": total},
+                "final": index == total - 1,
+            }
+            for index, chunk in enumerate(chunks)
+        ]
+
+        if session is None:
+            self._queue_outbox(chat_id, frames)
+            return SendResult(success=True, message_id=message_id)
+
+        await self._set_avatar(session, "speaking")
+        for index, frame in enumerate(frames):
+            ok = await self._push(session, frame)
             if not ok:
-                return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
+                # Соединение оборвалось на середине — остаток очереди уйдёт после
+                # переподключения, а не пропадёт молча.
+                self._queue_outbox(chat_id, frames[index:])
+                return SendResult(success=True, message_id=message_id)
         self._schedule_idle(session)
         return SendResult(success=True, message_id=message_id)
 
@@ -1093,6 +1116,9 @@ class HermesMobileAdapter(BasePlatformAdapter):
         """
         session = await self._session_for(chat_id)
         if session is None:
+            # Сообщение ещё в очереди — правим его там, чтобы не пришло два пузыря.
+            if self._replace_queued(chat_id, message_id, content, finalize):
+                return SendResult(success=True, message_id=message_id)
             return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
         ok = await self._push(
             session,
@@ -1186,17 +1212,93 @@ class HermesMobileAdapter(BasePlatformAdapter):
         return sum(int(buffer.get("bytes") or 0) for buffer in self._device_buffers(chat_id).values())
 
     async def _unregister(self, device: MobileDevice) -> None:
-        self._connections.pop(device.chat_id, None)
-        self._connection_tokens.pop(device.chat_id, None)
-        self._deliver_allowed.pop(device.chat_id, None)
-        # Незавершённые загрузки отключившегося устройства больше никто не дополнит.
-        for key in list(self._device_buffers(device.chat_id)):
-            self._media_buffers.pop(key, None)
-        self._sessions.pop(device.chat_id, None)
-        task = self._idle_tasks.pop(device.chat_id, None)
-        if task is not None:
-            await cancel_task(task)
-        logger.info("hermes-mobile: device %s disconnected", device.device_id)
+        # Снимаем регистрацию, только если она всё ещё наша. При переподключении того же
+        # устройства сервер закрывает прежнее соединение, но его обработчик завершается
+        # ПОЗЖЕ регистрации нового: слепой pop по chat_id выкинул бы живое соединение, и
+        # ответы агента падали бы с device_offline, хотя телефон на связи.
+        is_current = self._sessions.get(device.chat_id) is device
+        if is_current:
+            self._connections.pop(device.chat_id, None)
+            self._connection_tokens.pop(device.chat_id, None)
+            self._deliver_allowed.pop(device.chat_id, None)
+            self._sessions.pop(device.chat_id, None)
+            task = self._idle_tasks.pop(device.chat_id, None)
+            if task is not None:
+                await cancel_task(task)
+            # Незавершённые загрузки отключившегося устройства больше никто не дополнит.
+            # У живого нового соединения те же буферы трогать нельзя.
+            for key in list(self._device_buffers(device.chat_id)):
+                self._media_buffers.pop(key, None)
+        logger.info(
+            "hermes-mobile: device %s disconnected%s",
+            device.device_id,
+            "" if is_current else " (replaced by a new connection)",
+        )
+
+    def _queue_outbox(self, chat_id: str, frames: List[Dict[str, Any]]) -> None:
+        """Откладывает кадры ответа до следующего подключения этого устройства.
+
+        Ключ — id сообщения: если ответ пришёл кусками (или его потом поправили
+        стримингом), в очереди остаётся одна запись на сообщение, а не две копии.
+        """
+        now = time.time()
+        queued = {
+            message_id: entry
+            for message_id, entry in self._outbox.get(chat_id, {}).items()
+            if now - entry["at"] < self.outbox_ttl
+        }
+        for frame in frames:
+            message_id = str(frame.get("id") or uuid.uuid4().hex)
+            queued[message_id] = {"frame": frame, "at": now}
+            # Один и тот же id — это то же сообщение: заменяем, а не добавляем.
+        # Держим только хвост: десяток свежих ответов полезнее сотни старых.
+        while len(queued) > self.outbox_limit:
+            queued.pop(next(iter(queued)))
+        self._outbox[chat_id] = queued
+        logger.warning(
+            "hermes-mobile: device %s is offline — %d message(s) queued for delivery",
+            chat_id,
+            len(queued),
+        )
+
+    def _replace_queued(self, chat_id: str, message_id: str, content: str, finalize: bool) -> bool:
+        """Правит сообщение, ещё не дошедшее до устройства (стриминг при офлайне).
+
+        Иначе шлюз на неудачную правку дошлёт хвост обычным сообщением, и человек
+        получит два пузыря вместо одного.
+        """
+        entry = self._outbox.get(chat_id, {}).get(message_id)
+        if entry is None:
+            return False
+        entry["frame"] = {
+            **entry["frame"],
+            "text": content,
+            "edit": True,
+            "chunk": {"index": 0, "total": 1},
+            "final": bool(finalize),
+        }
+        entry["at"] = time.time()
+        return True
+
+    async def _flush_outbox(self, device: MobileDevice) -> None:
+        """Отдаёт устройству то, что не успело дойти, пока оно было не на связи."""
+        queued = self._outbox.pop(device.chat_id, {})
+        if not queued:
+            return
+        now = time.time()
+        delivered = 0
+        pending = list(queued.items())
+        for index, (message_id, entry) in enumerate(pending):
+            if now - entry["at"] > self.outbox_ttl:
+                continue
+            if not await self._push(device, entry["frame"]):
+                # Опять отвалилось — вернём остаток в очередь.
+                self._outbox[device.chat_id] = dict(pending[index:])
+                break
+            delivered += 1
+        if delivered:
+            self._schedule_idle(device)
+            logger.info("hermes-mobile: %d queued message(s) delivered to %s", delivered, device.device_id)
 
     async def _session_for(self, chat_id: str) -> Optional[MobileDevice]:
         """Ищет устройство по ``chat_id``, по «сырому» id и по домашнему устройству."""
