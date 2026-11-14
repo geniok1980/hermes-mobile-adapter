@@ -33,6 +33,23 @@ _CATALOG = {
         "setup.users_prompt": "User ids, comma-separated",
         "setup.home_device_prompt": "Default device id for cron",
         "setup.success": "Mobile App platform configured. Restart the gateway: hermes gateway restart",
+        "setup.card_header": "Connection card:",
+        "setup.invite_offer": "Send the address and token to Telegram (owner's chat)?",
+        "setup.invite_sent": "Connection card sent to Telegram.",
+        "setup.invite_failed": "Could not send the card to Telegram: {error}. Copy the address and token above.",
+        "setup.invite_skipped": "Telegram is not configured in this profile — copy the card above.",
+        # Connection card (Telegram / terminal).
+        "invite.name_default": "Hermes Agent",
+        "invite.no_address": "ws://<agent address>:{port}{path} (the agent's local network address)",
+        "invite.card": (
+            "📱 Agent \"{name}\" is ready for the app\n\n"
+            "Address:\n{urls}\n\n"
+            "App token:\n{token}\n\n"
+            "In the app: \"Find agent on the network\", or enter the address and token manually.\n"
+            "Token fingerprint: {fingerprint}\n\n"
+            "This is a secret: it grants access to the agent. To rotate it, remove MOBILE_TOKEN "
+            "from the profile .env and restart the gateway — a new card will arrive."
+        ),
         # Prompt card buttons.
         "label.approve_once": "✅ Approve once",
         "label.approve_always": "🔒 Always approve",
@@ -77,6 +94,23 @@ _CATALOG = {
         "setup.users_prompt": "ID пользователей через запятую",
         "setup.home_device_prompt": "ID устройства по умолчанию для cron",
         "setup.success": "Платформа Mobile App настроена. Перезапустите шлюз: hermes gateway restart",
+        "setup.card_header": "Карточка подключения:",
+        "setup.invite_offer": "Отправить адрес и токен в Telegram (в чат владельца)?",
+        "setup.invite_sent": "Карточка подключения отправлена в Telegram.",
+        "setup.invite_failed": "Не удалось отправить карточку в Telegram: {error}. Скопируйте адрес и токен выше.",
+        "setup.invite_skipped": "Telegram в этом профиле не настроен — скопируйте карточку выше.",
+        # Карточка подключения (Telegram / терминал).
+        "invite.name_default": "Hermes Agent",
+        "invite.no_address": "ws://<адрес агента>:{port}{path} (адрес агента в локальной сети)",
+        "invite.card": (
+            "📱 Агент «{name}» готов к подключению\n\n"
+            "Адрес:\n{urls}\n\n"
+            "Токен приложения:\n{token}\n\n"
+            "В приложении: «Найти агента в сети» или введите адрес и токен вручную.\n"
+            "Отпечаток токена: {fingerprint}\n\n"
+            "Это секрет: он даёт доступ к агенту. Чтобы перевыпустить — удалите MOBILE_TOKEN "
+            "из .env профиля и перезапустите шлюз, придёт новая карточка."
+        ),
         "label.approve_once": "✅ Одобрить один раз",
         "label.approve_always": "🔒 Всегда одобрять",
         "label.cancel": "❌ Отмена",

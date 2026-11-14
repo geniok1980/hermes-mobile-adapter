@@ -39,11 +39,15 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import importlib.util
+import json
 import logging
 import os
 import socket
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +85,8 @@ MAX_OPEN_MEDIA_UPLOADS = 8  # незавершённых многочастны�
 CLOSE_UNAUTHORIZED = 1008  # policy violation — WebSocket-стандарт для отказа в доступе
 DEFAULT_DISCOVERY_BURST = 10      # ответов discovery одному адресу за окно
 DEFAULT_DISCOVERY_WINDOW = 10.0   # окно ограничения, секунд
+DEFAULT_TELEGRAM_API = "https://api.telegram.org"
+INVITE_FILE = "mobile-invite.json"   # отметка об отправленном приглашении (по отпечатку токена)
 
 
 def _plugin_version(default: str = "") -> str:
@@ -93,6 +99,138 @@ def _plugin_version(default: str = "") -> str:
 
 
 ADAPTER_VERSION = _plugin_version()
+
+
+def _fingerprint(value: str) -> str:
+    """Короткий отпечаток секрета: по нему видно, что токен сменился (сам не раскрывается)."""
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _hermes_env_path() -> Path:
+    """Файл `.env` профиля агента — туда пишем сгенерированный токен."""
+    return Path(_get_hermes_home()).expanduser() / ".env"
+
+
+def save_profile_env(key: str, value: str) -> bool:
+    """Пишет `KEY=value` в `.env` профиля (заменяя прежнее значение) с правами 600.
+
+    Возвращает False, если файл записать нельзя: тогда вызывающий обязан сказать
+    об этом словами, а не делать вид, что токен сохранён.
+    """
+    key = str(key or "").strip()
+    if not key:
+        return False
+    path = _hermes_env_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines: List[str] = []
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()
+        line = f"{key}={value}"
+        replaced = False
+        for index, existing in enumerate(lines):
+            if existing.strip().startswith(f"{key}="):
+                lines[index] = line
+                replaced = True
+                break
+        if not replaced:
+            lines.append(line)
+        path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+        return True
+    except OSError:
+        logger.warning("hermes-mobile: could not save %s to %s", key, path)
+        return False
+
+
+def lan_addresses() -> List[str]:
+    """Адреса, по которым агент виден в локальной сети (частные IPv4).
+
+    `socket.gethostname()` на многих серверах не даёт ничего полезного, поэтому
+    второй заход — UDP-сокет «наружу»: пакет не отправляется, но ядро выбирает
+    адрес исходящего интерфейса.
+    """
+    found: List[str] = []
+    with contextlib.suppress(OSError):
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.append(str(info[4][0]))
+    with contextlib.suppress(OSError):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 53))
+            found.append(str(probe.getsockname()[0]))
+        finally:
+            probe.close()
+    unique: List[str] = []
+    for address in found:
+        parts = address.split(".")
+        private = (
+            len(parts) == 4
+            and parts[0].isdigit()
+            and (
+                parts[0] == "10"
+                or (parts[0] == "172" and 16 <= int(parts[1]) <= 31)
+                or (parts[0] == "192" and parts[1] == "168")
+            )
+        )
+        if private and address not in unique:
+            unique.append(address)
+    return unique
+
+
+def _profile_secret(name: str) -> str:
+    """Секрет профиля: сначала scoped-хранилище Hermes, затем переменные окружения."""
+    with contextlib.suppress(Exception):
+        value = _get_scoped_secret(name)
+        if value:
+            return str(value).strip()
+    return str(os.getenv(name, "") or "").strip()
+
+
+def telegram_target(chat_override: str = "") -> Tuple[str, str]:
+    """Бот и чат владельца для приглашения: `TELEGRAM_BOT_TOKEN` + домашний чат."""
+    bot = _profile_secret("TELEGRAM_BOT_TOKEN")
+    chat = (
+        str(chat_override or "").strip()
+        or _profile_secret("TELEGRAM_HOME_CHANNEL")
+        or (_profile_secret("TELEGRAM_ALLOWED_USERS").split(",")[0].strip() if _profile_secret("TELEGRAM_ALLOWED_USERS") else "")
+    )
+    return bot, chat
+
+
+def send_telegram_card(api: str, bot: str, chat: str, text: str, timeout: float = 10.0) -> Tuple[bool, str]:
+    """Отправляет карточку подключения в Telegram. Секрет в журнал не попадает."""
+    if not bot or not chat:
+        return False, "telegram_not_configured"
+    url = f"{str(api or DEFAULT_TELEGRAM_API).rstrip('/')}/bot{bot}/sendMessage"
+    payload = json.dumps(
+        {"chat_id": chat, "text": text, "disable_web_page_preview": True},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "ignore")
+        ok = '"ok":true' in body.replace(" ", "")
+        return (True, "") if ok else (False, "telegram_rejected")
+    except urllib.error.HTTPError as exc:
+        return False, f"telegram_http_{exc.code}"
+    except Exception as exc:  # сеть, таймаут, DNS
+        return False, exc.__class__.__name__
+
+
+def invite_text(name: str, token: str, address: str, port: int, path: str) -> str:
+    """Текст карточки подключения (локаль из i18n)."""
+    urls = "\n".join(f"ws://{host}:{port}{path}" for host in [address] if host)
+    return i18n.t(
+        "invite.card",
+        name=name or i18n.t("invite.name_default"),
+        urls=urls or i18n.t("invite.no_address", port=port, path=path),
+        token=token,
+        fingerprint=_fingerprint(token),
+    )
 
 
 @dataclass
@@ -210,6 +348,21 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self.discovery_window = float(extra.get("discovery_window", DEFAULT_DISCOVERY_WINDOW) or DEFAULT_DISCOVERY_WINDOW)
         self._discovery_hits: Dict[str, List[float]] = {}
 
+        # Токен и приглашение. Плагин сам заводит секрет, если его нет (MOBILE_AUTO_TOKEN),
+        # и один раз присылает владельцу карточку подключения в Telegram: адрес, токен,
+        # отпечаток. Приглашение не уходит повторно на тот же токен (отметка в профиле).
+        raw_auto = _env_or_extra(extra, "MOBILE_AUTO_TOKEN", "auto_token", "1")
+        self.auto_token = str(raw_auto).strip().lower() not in ("0", "false", "no", "off")
+        raw_invite = _env_or_extra(extra, "MOBILE_INVITE", "invite", "1")
+        self.invite_enabled = str(raw_invite).strip().lower() not in ("0", "false", "no", "off")
+        self.invite_chat = str(_env_or_extra(extra, "MOBILE_INVITE_CHAT", "invite_chat", "") or "").strip()
+        self.telegram_api = str(
+            _env_or_extra(extra, "MOBILE_TELEGRAM_API", "telegram_api", DEFAULT_TELEGRAM_API)
+            or DEFAULT_TELEGRAM_API
+        ).strip()
+        self.token_generated = False
+        self._invite_task: Optional[asyncio.Task] = None
+
         # Белый список устройств — отдельный от пользовательского: MOBILE_ALLOWED_USERS
         # проверяет сам Hermes (это список пользователей, там pairing/политики), а устройства
         # ограничиваем отдельной переменной, чтобы одно имя не значило две разные вещи.
@@ -277,11 +430,11 @@ class HermesMobileAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Поднимает WebSocket-сервер для приложения."""
-        if not self.token:
+        if not self.token and not self._ensure_token():
             return self._fail(
                 "config_missing",
                 "MOBILE_TOKEN is not set: the mobile app will not be able to authenticate "
-                "(generate a token: openssl rand -hex 32)",
+                "(generate a token: openssl rand -hex 32, or allow MOBILE_AUTO_TOKEN=1)",
                 retryable=False,
             )
         if not self._acquire_platform_lock(
@@ -309,10 +462,17 @@ class HermesMobileAdapter(BasePlatformAdapter):
             "hermes-mobile: listening on ws://%s:%s%s (allow-listed devices: %d)",
             self.host, self.port, self.path, len(self.allowed_devices),
         )
+        # Карточку подключения владельцу шлём в фоне: недоступный Telegram не должен
+        # задерживать старт шлюза и тем более ломать платформу.
+        with contextlib.suppress(RuntimeError):
+            self._invite_task = asyncio.create_task(self._announce_invite())
         return True
 
     async def disconnect(self) -> None:
         """Закрывает сервер и все активные соединения."""
+        if self._invite_task is not None:
+            await cancel_task(self._invite_task)
+            self._invite_task = None
         if self._server is not None:
             self._server.close()
             with contextlib.suppress(Exception):
@@ -1173,6 +1333,118 @@ class HermesMobileAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=proto.E_DEVICE_OFFLINE, retryable=False)
         return SendResult(success=True, message_id=message_id)
 
+    # ── токен и приглашение владельцу ────────────────────────────────────────
+
+    def _ensure_token(self) -> bool:
+        """Заводит токен, если его нет: берёт из `.env` профиля или генерирует новый.
+
+        Файл читаем сами: шлюз обычно загружает `.env` в окружение, но полагаться на это
+        нельзя — при старте без загруженного `.env` каждый перезапуск выпускал бы новый
+        токен и присылал новую карточку. Если записать `.env` нельзя — возвращаем False,
+        и шлюз скажет об этом словами.
+        """
+        if self.token:
+            return True
+        existing = self._token_from_env_file()
+        if existing:
+            self.token = existing
+            return True
+        if not self.auto_token:
+            return False
+        token = os.urandom(32).hex()
+        if not save_profile_env("MOBILE_TOKEN", token):
+            return False
+        self.token = token
+        self.token_generated = True
+        logger.info(
+            "hermes-mobile: generated MOBILE_TOKEN (fingerprint %s) and saved it to %s",
+            _fingerprint(token),
+            _hermes_env_path(),
+        )
+        return True
+
+    def _token_from_env_file(self) -> str:
+        """`MOBILE_TOKEN` из `.env` профиля (без загрузки всего файла в окружение)."""
+        with contextlib.suppress(OSError):
+            for line in _hermes_env_path().read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, _, value = stripped.partition("=")
+                if key.strip() == "MOBILE_TOKEN":
+                    return value.strip().strip("\"'")
+        return ""
+
+    def _invite_marker_path(self) -> Path:
+        return Path(_get_hermes_home()).expanduser() / INVITE_FILE
+
+    def _read_invite_marker(self) -> str:
+        with contextlib.suppress(Exception):
+            data = json.loads(self._invite_marker_path().read_text(encoding="utf-8"))
+            return str(data.get("token_fingerprint") or "")
+        return ""
+
+    def _write_invite_marker(self, fingerprint: str, sent: bool) -> None:
+        payload = {
+            "token_fingerprint": fingerprint,
+            "sent": bool(sent),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        with contextlib.suppress(OSError):
+            path = self._invite_marker_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+
+    def _invite_reason(self, fingerprint: str) -> str:
+        """Почему шлём карточку: `generated`, `rotated` или `none`.
+
+        Отметка нужна, чтобы обновление плагина не вывалило в чат уже известный токен.
+        Первый запуск с готовым токеном только «взводит» отметку: карточка уйдёт при
+        смене токена (перевыпуск) или если её отправил мастер настройки.
+        """
+        if self.token_generated:
+            return "generated"
+        previous = self._read_invite_marker()
+        if not previous:
+            self._write_invite_marker(fingerprint, sent=False)
+            logger.info("hermes-mobile: invite armed for token rotation (fingerprint %s)", fingerprint)
+            return "none"
+        return "rotated" if previous != fingerprint else "none"
+
+    def _invite_message(self) -> str:
+        addresses = lan_addresses()
+        address = addresses[0] if addresses else ""
+        return invite_text(
+            name=self.agent_name or self._profile_name(),
+            token=self.token,
+            address=address,
+            port=self.port,
+            path=self.path,
+        )
+
+    async def _announce_invite(self) -> None:
+        """Одна карточка подключения в Telegram владельцу (адрес + токен)."""
+        if not self.invite_enabled or not self.token:
+            return
+        fingerprint = _fingerprint(self.token)
+        reason = self._invite_reason(fingerprint)
+        if reason == "none":
+            return
+        bot, chat = telegram_target(self.invite_chat)
+        if not bot or not chat:
+            logger.info("hermes-mobile: invite skipped — Telegram is not configured in this profile")
+            return
+        ok, error = await asyncio.to_thread(
+            send_telegram_card, self.telegram_api, bot, chat, self._invite_message()
+        )
+        if ok:
+            self._write_invite_marker(fingerprint, sent=True)
+            logger.info("hermes-mobile: connection card sent to Telegram (%s, fingerprint %s)", reason, fingerprint)
+        else:
+            # Отметку не пишем: при следующем старте попробуем снова.
+            logger.warning("hermes-mobile: could not send connection card to Telegram (%s)", error)
+
     # ── вспомогательное для соединений ───────────────────────────────────────
 
     def _peer_ip(self, websocket) -> str:
@@ -1756,6 +2028,31 @@ def interactive_setup() -> None:
             prompt(i18n.t("setup.users_prompt"), default="").strip(),
         )
     save_env_value("MOBILE_HOME_DEVICE", prompt(i18n.t("setup.home_device_prompt"), default="").strip())
+
+    # Карточка подключения: печатаем адрес и токен целиком и, если в профиле настроен
+    # Telegram, предлагаем отправить её владельцу — не надо переписывать секрет из терминала.
+    path = str(os.getenv("MOBILE_PATH", DEFAULT_PATH) or DEFAULT_PATH)
+    if not path.startswith("/"):
+        path = f"/{path}"
+    address = (lan_addresses() or [""])[0]
+    card = invite_text(
+        name=str(os.getenv("MOBILE_AGENT_NAME", "") or ""),
+        token=token,
+        address=address,
+        port=coerce_port(port, DEFAULT_PORT),
+        path=path,
+    )
+    print_header(i18n.t("setup.card_header"))
+    print_info(card)
+    bot, chat = telegram_target()
+    if not bot or not chat:
+        print_info(i18n.t("setup.invite_skipped"))
+    elif prompt_yes_no(i18n.t("setup.invite_offer"), default=True):
+        ok, error = send_telegram_card(DEFAULT_TELEGRAM_API, bot, chat, card)
+        if ok:
+            print_success(i18n.t("setup.invite_sent"))
+        else:
+            print_info(i18n.t("setup.invite_failed", error=error))
     print_success(i18n.t("setup.success"))
 
 

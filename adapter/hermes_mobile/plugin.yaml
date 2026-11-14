@@ -1,15 +1,17 @@
 name: hermes-mobile
 label: Mobile App (WebSocket)
 kind: platform
-version: 1.2.0
+version: 1.3.0
 requires_hermes: ">=0.21.6"
 description: >
   Platform adapter for mobile applications: it runs a WebSocket server inside
   Hermes Agent and the app connects to the agent directly — text, voice, agent
   replies and avatar events (thinking / speaking / idle). The only dependency is
-  `websockets` (already shipped with the Hermes environment). The app can find the
-  agent on the local network: it answers the pre-auth `discover` frame with the
-  agent name, port and path. Protocol: site-docs/protocol/index.md.
+  `websockets` (already shipped with the Hermes environment). Installs itself:
+  generates MOBILE_TOKEN when missing and sends a connection card (address + token)
+  to the owner's Telegram chat. The app can find the agent on the local network: it
+  answers the pre-auth `discover` frame with the agent name, port and path.
+  Protocol: site-docs/protocol/index.md.
 author: HermesAI (geniok1980)
 # ``requires_env`` is shown by ``hermes config`` and ``hermes gateway setup``.
 requires_env:
@@ -38,6 +40,18 @@ optional_env:
   - name: MOBILE_DISCOVERY
     description: "1/0 — answer the app's pre-auth `discover` frame so the app can find this agent on the local network (default 1; the reply carries the agent name, port and path, never the token)."
     prompt: "Allow finding the agent on the local network? (1/0)"
+    password: false
+  - name: MOBILE_AUTO_TOKEN
+    description: "1/0 — generate MOBILE_TOKEN and save it to the profile .env when it is missing (default 1), so the plugin starts without manual token setup"
+    prompt: "Generate the app token automatically? (1/0)"
+    password: false
+  - name: MOBILE_INVITE
+    description: "1/0 — send a one-time connection card (address + token) to the owner's Telegram chat when the token is generated or rotated (default 1; requires TELEGRAM_BOT_TOKEN and TELEGRAM_HOME_CHANNEL)"
+    prompt: "Send the connection card to Telegram? (1/0)"
+    password: false
+  - name: MOBILE_INVITE_CHAT
+    description: "Telegram chat for the connection card (default: TELEGRAM_HOME_CHANNEL, then the first allowed user)"
+    prompt: "Telegram chat id for the card"
     password: false
   - name: MOBILE_AGENT_NAME
     description: "Name shown in the app's list of agents found on the local network (default: Hermes profile name, then host name)"

@@ -164,9 +164,18 @@ class TestConnectAndAuth(BaseWS):
         self.assertIn(f"ws://127.0.0.1:{self.port}/ws", self.adapter.listener_base or "")
 
     async def test_connect_without_token_fails_descriptively(self):
+        # Автогенерация выключена — тогда шлюз говорит словами, что токена нет.
         self.adapter.token = ""
+        self.adapter.auto_token = False
         self.assertFalse(await self.adapter.connect())
         self.assertIn("MOBILE_TOKEN", self.adapter._fatal_error_message or "")
+
+    async def test_connect_without_token_generates_it(self):
+        # По умолчанию плагин заводит секрет сам и не требует ручной настройки.
+        self.adapter.token = ""
+        self.assertTrue(await self.adapter.connect())
+        self.assertEqual(len(self.adapter.token), 64)
+        self.assertTrue(self.adapter.token_generated)
 
     async def test_ready_frame_on_valid_token(self):
         await self.adapter.connect()

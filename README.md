@@ -52,7 +52,6 @@
 
 ```bash
 cp -r adapter/hermes_mobile ~/.hermes/plugins/hermes-mobile
-printf 'MOBILE_TOKEN=%s\n' "$(openssl rand -hex 32)" >> ~/.hermes/.env
 python - <<'PY'
 import pathlib, yaml
 p = pathlib.Path.home() / '.hermes' / 'config.yaml'
@@ -63,8 +62,13 @@ p.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False))
 PY
 hermes gateway restart
 ss -ltn | grep 8787          # адаптер слушает
-hermes pairing list          # при первом контакте — pairing-код, odobрить: hermes pairing approve mobile <id>
+hermes pairing list          # при первом контакте — pairing-код, одобрить: hermes pairing approve mobile <id>
 ```
+
+`MOBILE_TOKEN` готовить не нужно: если его нет, адаптер сам заводит секрет, сохраняет в `.env`
+профиля (`600`) и присылает владельцу в Telegram карточку — адрес в локальной сети и токен.
+Нужны только настроенные `TELEGRAM_BOT_TOKEN` и `TELEGRAM_HOME_CHANNEL`; выключается
+`MOBILE_INVITE=0`. Токен, заданный вручную, используется как раньше.
 
 Подробно: [`site-docs/host/install.md`](site-docs/host/install.md).
 
