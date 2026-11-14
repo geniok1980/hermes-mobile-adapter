@@ -242,5 +242,44 @@ class TestCardText(unittest.TestCase):
         self.assertIn("8787/ws", text)
 
 
+class TestSetupWizard(unittest.TestCase):
+    """Мастер настройки: генерирует токен, печатает карточку и предлагает отправить её."""
+
+    def test_wizard_generates_token_and_offers_card(self):
+        from unittest import mock
+
+        saved: dict[str, str] = {}
+        printed: list[str] = []
+        sent: list[str] = []
+
+        def fake_prompt(_text, default="", **_kwargs):
+            return default  # токен — пусто, значит генерировать; остальное по умолчанию
+
+        def fake_yes_no(_text, default=False, **_kwargs):
+            return True
+
+        def fake_save(key, value):
+            saved[key] = value
+
+        with mock.patch("hermes_cli.setup.prompt", fake_prompt), \
+             mock.patch("hermes_cli.setup.prompt_yes_no", fake_yes_no), \
+             mock.patch("hermes_cli.setup.save_env_value", fake_save), \
+             mock.patch("hermes_cli.setup.print_header", lambda text: printed.append(str(text))), \
+             mock.patch("hermes_cli.setup.print_info", lambda text: printed.append(str(text))), \
+             mock.patch("hermes_cli.setup.print_success", lambda text: printed.append(str(text))), \
+             mock.patch.object(mobile_adapter, "telegram_target", lambda *_a, **_k: ("bot", "chat")), \
+             mock.patch.object(mobile_adapter, "send_telegram_card", lambda api, bot, chat, text, **kw: (sent.append(text) or (True, ""))):
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                mobile_adapter.interactive_setup()
+
+        token = saved.get("MOBILE_TOKEN", "")
+        self.assertEqual(len(token), 64)
+        self.assertEqual(len(sent), 1)
+        self.assertIn(token, sent[0])
+        self.assertIn("ws://", sent[0])
+        self.assertTrue(printed)
+
+
 if __name__ == "__main__":
     unittest.main()
