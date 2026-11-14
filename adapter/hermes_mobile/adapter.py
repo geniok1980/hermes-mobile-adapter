@@ -42,6 +42,7 @@ import contextlib
 import importlib.util
 import logging
 import os
+import socket
 import time
 import uuid
 from dataclasses import dataclass
@@ -78,6 +79,20 @@ DEFAULT_OUTBOX_LIMIT = 20
 DEFAULT_TYPING_IDLE_SECONDS = 3.0
 MAX_OPEN_MEDIA_UPLOADS = 8  # незавершённых многочастных загрузок на устройство
 CLOSE_UNAUTHORIZED = 1008  # policy violation — WebSocket-стандарт для отказа в доступе
+DEFAULT_DISCOVERY_BURST = 10      # ответов discovery одному адресу за окно
+DEFAULT_DISCOVERY_WINDOW = 10.0   # окно ограничения, секунд
+
+
+def _plugin_version(default: str = "") -> str:
+    """Версия адаптера из ``plugin.yaml`` — её показываем в кадре discover."""
+    with contextlib.suppress(Exception):
+        for line in Path(__file__).with_name("plugin.yaml").read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip("\"'")
+    return default
+
+
+ADAPTER_VERSION = _plugin_version()
 
 
 @dataclass
@@ -181,6 +196,19 @@ class HermesMobileAdapter(BasePlatformAdapter):
         raw_path = str(_env_or_extra(extra, "MOBILE_PATH", "path", DEFAULT_PATH) or DEFAULT_PATH)
         self.path = "/" + raw_path.strip().strip("/")
         self.avatar_url = str(_env_or_extra(extra, "MOBILE_AVATAR_URL", "avatar_url", "") or "").strip()
+
+        # Поиск агента в локальной сети (кадр discover до авторизации). По умолчанию
+        # включён: в ответе только имя агента и адрес — ни токена, ни списков.
+        raw_discovery = _env_or_extra(extra, "MOBILE_DISCOVERY", "discovery", "1")
+        self.discovery_enabled = str(raw_discovery).strip().lower() not in ("0", "false", "no", "off")
+        # Имя агента в списке найденных: по умолчанию профиль, затем имя хоста.
+        self.agent_name = str(_env_or_extra(extra, "MOBILE_AGENT_NAME", "agent_name", "") or "").strip()
+        # Ограничение частоты: за окно одному адресу отвечаем не больше N раз. Строгий
+        # «раз в секунду» ломает честный поиск, когда приложение и агент на одной машине
+        # (проба до перебора съедает окно) — а от чужого сканера хватает и пачки.
+        self.discovery_burst = int(extra.get("discovery_burst", DEFAULT_DISCOVERY_BURST) or DEFAULT_DISCOVERY_BURST)
+        self.discovery_window = float(extra.get("discovery_window", DEFAULT_DISCOVERY_WINDOW) or DEFAULT_DISCOVERY_WINDOW)
+        self._discovery_hits: Dict[str, List[float]] = {}
 
         # Белый список устройств — отдельный от пользовательского: MOBILE_ALLOWED_USERS
         # проверяет сам Hermes (это список пользователей, там pairing/политики), а устройства
@@ -311,12 +339,19 @@ class HermesMobileAdapter(BasePlatformAdapter):
         """Обслуживает одно подключение приложения до разрыва."""
         device: Optional[MobileDevice] = None
         try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=self.hello_timeout)
+            frame = proto.loads(raw)
+            kind = proto.frame_type(frame)
+            # Поиск агента в локальной сети: кадр discover принимаем ДО авторизации и на
+            # любом пути. Порт целиком наш, а приложение перебирает адреса подсети и о
+            # настоящем пути узнаёт из ответа (поэтому путь здесь ещё не проверяем).
+            if kind == proto.C_DISCOVER:
+                await self._on_discover(websocket)
+                return
             if not self._path_matches(websocket):
                 await self._reject(websocket, proto.E_UNSUPPORTED, i18n.t("err.unknown_path", path=self._request_path(websocket)))
                 return
-            raw = await asyncio.wait_for(websocket.recv(), timeout=self.hello_timeout)
-            frame = proto.loads(raw)
-            if proto.frame_type(frame) != proto.C_HELLO:
+            if kind != proto.C_HELLO:
                 await self._reject(websocket, proto.E_BAD_FRAME, i18n.t("err.first_frame_hello"))
                 return
             token = self._token_from(frame, websocket)
@@ -412,6 +447,9 @@ class HermesMobileAdapter(BasePlatformAdapter):
                 await self._send_command_catalog(device)
             elif kind == proto.C_MODELS:
                 await self._send_model_options(device)
+            elif kind == proto.C_DISCOVER:
+                # Повторный поиск по уже подключённому соединению (диагностика).
+                await websocket.send(proto.dumps(self._discover_payload()))
             elif kind == proto.C_HELLO:
                 raise proto.ProtocolError(proto.E_BAD_FRAME, i18n.t("err.repeated_hello"))
             else:
@@ -1136,6 +1174,79 @@ class HermesMobileAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=message_id)
 
     # ── вспомогательное для соединений ───────────────────────────────────────
+
+    def _peer_ip(self, websocket) -> str:
+        """Адрес клиента: по нему ограничиваем частоту ответов discovery."""
+        with contextlib.suppress(Exception):
+            peer = getattr(websocket, "remote_address", None)
+            if peer:
+                return str(peer[0])
+        return ""
+
+    def _profile_name(self) -> str:
+        """Имя профиля Hermes (у профиля по умолчанию — пусто)."""
+        with contextlib.suppress(Exception):
+            name = Path(_get_hermes_home()).expanduser().name
+            if name not in ("", ".hermes", "hermes", "home"):
+                return name
+        return ""
+
+    def _discover_payload(self) -> Dict[str, Any]:
+        """Общедоступные сведения об агенте для кадра discover (без секретов)."""
+        profile = self._profile_name()
+        host = ""
+        with contextlib.suppress(Exception):
+            host = socket.gethostname()
+        return proto.discover_frame(
+            agent=self.agent_name or profile or host or "Hermes Agent",
+            profile=profile,
+            server=host,
+            port=self.port,
+            path=self.path,
+            adapter_version=ADAPTER_VERSION,
+            avatar=bool(self.avatar_url),
+        )
+
+    def _discovery_allowed(self, peer: str) -> bool:
+        """Не больше ``discovery_burst`` ответов одному адресу за ``discovery_window``.
+
+        Окно, а не «раз в секунду»: приложение может опросить агента дважды подряд
+        (проба, затем перебор), и честный поиск не должен ломаться. От чужого сканера
+        защищает именно пачка — таблица чистится по сроку, чтобы её не растянуло
+        сканирование /8.
+        """
+        if not peer:
+            return True
+        now = time.time()
+        recent = [seen for seen in self._discovery_hits.get(peer, []) if now - seen < self.discovery_window]
+        if len(recent) >= self.discovery_burst:
+            self._discovery_hits[peer] = recent
+            return False
+        recent.append(now)
+        self._discovery_hits[peer] = recent
+        if len(self._discovery_hits) > 512:
+            cutoff = now - self.discovery_window
+            self._discovery_hits = {
+                key: [seen for seen in hits if seen >= cutoff]
+                for key, hits in self._discovery_hits.items()
+                if any(seen >= cutoff for seen in hits)
+            }
+        return True
+
+    async def _on_discover(self, websocket) -> None:
+        """Отвечает на кадр discover и закрывает соединение: дальше идёт hello."""
+        if not self.discovery_enabled:
+            await self._reject(websocket, proto.E_UNSUPPORTED, i18n.t("err.discovery_disabled"))
+            return
+        peer = self._peer_ip(websocket)
+        if not self._discovery_allowed(peer):
+            await self._reject(websocket, proto.E_FORBIDDEN, i18n.t("err.discovery_rate_limited"))
+            return
+        logger.info("hermes-mobile: discovery request from %s", peer or "<unknown>")
+        with contextlib.suppress(Exception):
+            await websocket.send(proto.dumps(self._discover_payload()))
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1000, reason="discover")
 
     def _request_path(self, websocket) -> str:
         with contextlib.suppress(Exception):

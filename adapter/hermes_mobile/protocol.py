@@ -36,6 +36,7 @@ MAX_FRAME_BYTES = 16 * 1024 * 1024       # потолок одного WS-кад
 MAX_TEXT_CHARS = 12000                   # больше — отклоняем с понятной ошибкой
 MAX_AUDIO_BYTES = 8 * 1024 * 1024        # ~8 МБ PCM/WAV — хватает на минуты речи
 DEFAULT_CHUNK_LIMIT = 3500               # нарезка ответа агента для мобильного экрана
+DEFAULT_DISCOVER_PATH = "/ws"            # путь по умолчанию в ответе на кадр discover
 
 # ── Типы кадров: клиент → сервер ─────────────────────────────────────────────
 C_HELLO = "hello"        # {t, token?, device:{id,name,platform,app_version}, user:{id,name}}
@@ -49,9 +50,13 @@ C_PROMPT = "prompt"      # {t, prompt_id, option_id, text?} — ответ на 
 C_MEDIA = "media"        # {t, id, kind, mime, filename?, caption?, data, part?, parts?} — медиа от приложения
 C_COMMANDS = "commands"  # {t} — просьба отдать каталог команд агента
 C_MODELS = "models"      # {t} — просьба отдать список моделей для выбора
+# Поиск агента в локальной сети: отправляется ДО авторизации, на любой путь.
+# В ответе только общедоступные сведения (см. discover_frame) — ни токена, ни списков.
+C_DISCOVER = "discover"  # {t, v?}
 
 # ── Типы кадров: сервер → клиент ─────────────────────────────────────────────
 S_READY = "ready"        # {t, v, session, device, avatar_url, capabilities}
+S_DISCOVER = "discover"  # {t, v, platform, adapter, agent:{name,profile}, server, port, path, requires_token, capabilities}
 S_TYPING = "typing"      # {t, stop?} — «агент печатает» / остановить индикатор
 S_MESSAGE = "message"    # {t, id, text, chunk:{index,total}, final, edit?}
 S_AVATAR = "avatar"      # {t, state:"idle"|"thinking"|"speaking", mood?}
@@ -456,6 +461,36 @@ def option_allowed(kind: str, option_id: str) -> bool:
     if kind == P_CLARIFY:
         return option == CLARIFY_OTHER or (len(option) > 1 and option[0] == "c" and option[1:].isdigit())
     return False
+
+
+def discover_frame(
+    *,
+    agent: str = "",
+    profile: str = "",
+    server: str = "",
+    port: int = 0,
+    path: str = "/ws",
+    adapter_version: str = "",
+    avatar: bool = False,
+) -> Dict[str, Any]:
+    """Ответ на кадр ``discover`` — только общедоступные сведения об агенте.
+
+    Кадр отдаётся ДО авторизации, поэтому в нём нет ни токена, ни списков
+    устройств/пользователей, ни домашнего каталога: имя агента, профиль, имя хоста,
+    порт и путь — ровно то, что нужно приложению, чтобы предложить подключение.
+    """
+    return {
+        "t": S_DISCOVER,
+        "v": PROTOCOL_VERSION,
+        "platform": "hermes-mobile",
+        "adapter": str(adapter_version or ""),
+        "agent": {"name": str(agent or ""), "profile": str(profile or "")},
+        "server": str(server or ""),
+        "port": int(port or 0),
+        "path": str(path or DEFAULT_DISCOVER_PATH),
+        "requires_token": True,
+        "capabilities": {"text": True, "voice": True, "avatar": bool(avatar)},
+    }
 
 
 def commands_frame(commands: Iterable[Dict[str, Any]]) -> Dict[str, Any]:

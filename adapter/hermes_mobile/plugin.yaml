@@ -1,14 +1,15 @@
 name: hermes-mobile
 label: Mobile App (WebSocket)
 kind: platform
-version: 1.1.1
+version: 1.2.0
 requires_hermes: ">=0.21.6"
 description: >
   Platform adapter for mobile applications: it runs a WebSocket server inside
   Hermes Agent and the app connects to the agent directly — text, voice, agent
   replies and avatar events (thinking / speaking / idle). The only dependency is
-  `websockets` (already shipped with the Hermes environment). Protocol:
-  site-docs/protocol/index.md.
+  `websockets` (already shipped with the Hermes environment). The app can find the
+  agent on the local network: it answers the pre-auth `discover` frame with the
+  agent name, port and path. Protocol: site-docs/protocol/index.md.
 author: HermesAI (geniok1980)
 # ``requires_env`` is shown by ``hermes config`` and ``hermes gateway setup``.
 requires_env:
@@ -33,6 +34,14 @@ optional_env:
   - name: MOBILE_AVATAR_URL
     description: "URL of the avatar HTML page the app opens"
     prompt: "Avatar URL"
+    password: false
+  - name: MOBILE_DISCOVERY
+    description: "1/0 — answer the app's pre-auth `discover` frame so the app can find this agent on the local network (default 1; the reply carries the agent name, port and path, never the token)."
+    prompt: "Allow finding the agent on the local network? (1/0)"
+    password: false
+  - name: MOBILE_AGENT_NAME
+    description: "Name shown in the app's list of agents found on the local network (default: Hermes profile name, then host name)"
+    prompt: "Agent name for discovery"
     password: false
   - name: MOBILE_HOME_DEVICE
     description: "Default device for delivery (cron → deliver=mobile)"
