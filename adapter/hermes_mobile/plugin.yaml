@@ -1,7 +1,7 @@
 name: hermes-mobile
 label: Mobile App (WebSocket)
 kind: platform
-version: 1.3.0
+version: 1.4.0
 requires_hermes: ">=0.21.6"
 description: >
   Platform adapter for mobile applications: it runs a WebSocket server inside
@@ -62,7 +62,7 @@ optional_env:
     prompt: "Default device id"
     password: false
   - name: MOBILE_ALLOWED_USERS
-    description: "Comma-separated user ids — enforced by Hermes itself (authorization and pairing)"
+    description: "Comma-separated user ids — optional restriction. Empty (default): whoever holds the app token is authorized, no pairing. Set it only to limit access to specific devices/users"
     prompt: "Allowed users"
     password: false
   - name: MOBILE_ALLOWED_DEVICES
@@ -70,7 +70,7 @@ optional_env:
     prompt: "Allowed devices"
     password: false
   - name: MOBILE_ALLOW_ALL_USERS
-    description: "1/true — accept any user with a valid token without checking the allow list (handy for development; prefer MOBILE_ALLOWED_USERS in production)"
+    description: "Kept for compatibility: with an empty MOBILE_ALLOWED_USERS access by token is already open. Set it to 1 only for clarity in configs that list every switch."
     prompt: "Allow all users? (1/0)"
     password: false
   - name: MOBILE_EXTRA_TOKENS

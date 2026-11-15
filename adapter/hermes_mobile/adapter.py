@@ -68,6 +68,7 @@ from gateway.platforms._shared import (
 )
 from hermes_constants import get_hermes_home as _get_hermes_home
 from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.access_policy_mixin import OwnAccessPolicyMixin
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator, cancel_task
 
@@ -305,8 +306,13 @@ def validate_target_ref(target_ref: str) -> bool | str:
     return True
 
 
-class HermesMobileAdapter(BasePlatformAdapter):
+class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     """WebSocket-адаптер мобильного приложения (платформа hermes-mobile)."""
+
+    # Доступ к агенту решает адаптер: соединение уже авторизовано токеном приложения,
+    # поэтому отдельного «пользователя» для pairing нет — токен и есть ключ.
+    # Список MOBILE_ALLOWED_USERS, если владелец его задал, уважаем внутри _is_dm_allowed.
+    ALLOW_ALL_ENV_PREFIX = "MOBILE"
 
     # Сколько символов шлём одним кадром message. База читает этот атрибут для нарезки
     # и для стриминга (gateway/platforms/base.py: MAX_MESSAGE_LENGTH, по умолчанию 4096).
@@ -374,6 +380,18 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self.allowed_devices: List[str] = [str(a).strip() for a in allowed_devices if str(a).strip()]
         self.home_device = str(extra.get("home_device") or _get_scoped_secret("MOBILE_HOME_DEVICE", "") or "").strip()
 
+        # Собственная политика доступа. Пользователь приложения уже авторизован токеном
+        # приложения (без него соединение не открывается), поэтому по умолчанию доступ
+        # открыт и ядро не просит pairing. Если владелец задал MOBILE_ALLOWED_USERS,
+        # разрешаем только перечисленные идентификаторы — это и есть «узкая» настройка.
+        raw_users = extra.get("allowed_users") or _get_scoped_secret("MOBILE_ALLOWED_USERS", "") or ""
+        if isinstance(raw_users, (list, tuple, set)):
+            raw_users = ",".join(str(item) for item in raw_users)
+        self.allowed_users: List[str] = proto.split_tokens(str(raw_users)) if str(raw_users).strip() else []
+        self._dm_policy = "allowlist"      # вердикт считает _is_dm_allowed ниже
+        self._group_policy = "disabled"    # групп в приложении нет
+        self._allow_from = tuple(self.allowed_users)
+
         max_len = extra.get("max_message_length")
         if max_len is None:
             with contextlib.suppress(Exception):
@@ -412,6 +430,24 @@ class HermesMobileAdapter(BasePlatformAdapter):
         self._outbox: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.outbox_ttl = float(extra.get("outbox_ttl", DEFAULT_OUTBOX_TTL) or DEFAULT_OUTBOX_TTL)
         self.outbox_limit = int(extra.get("outbox_limit", DEFAULT_OUTBOX_LIMIT) or DEFAULT_OUTBOX_LIMIT)
+
+    # ── доступ пользователя ──────────────────────────────────────────────────
+
+    def _is_dm_allowed(self, sender_id: str) -> bool:
+        """Кого пускаем к агенту без pairing.
+
+        Соединение уже авторизовано токеном приложения: у кого токен — тот и владелец.
+        Поэтому по умолчанию пускаем любого, у кого есть идентификатор (приложение
+        шлёт `user.id` в кадре hello). Если владелец задал MOBILE_ALLOWED_USERS,
+        пускаем только перечисленных — и тогда остальным ядро предложит pairing-код.
+        """
+        principal = str(sender_id or "").strip()
+        if not principal:
+            return False
+        if not self.allowed_users:
+            return True
+        normalized = {str(item).strip() for item in self.allowed_users if str(item).strip()}
+        return principal in normalized or f"{PLATFORM_NAME}:{principal}" in normalized
 
     # ── служебное ────────────────────────────────────────────────────────────
 
