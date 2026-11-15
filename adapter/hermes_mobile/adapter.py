@@ -314,6 +314,17 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     # Список MOBILE_ALLOWED_USERS, если владелец его задал, уважаем внутри _is_dm_allowed.
     ALLOW_ALL_ENV_PREFIX = "MOBILE"
 
+    @property
+    def authorization_is_upstream(self) -> bool:
+        """Соединение авторизовано токеном приложения на входе (upstream).
+
+        На свежих версиях Hermes без этого признака native admission отвечает
+        `permission_denied` — ядро пытается само решить, «можно ли этому пользователю»,
+        хотя решение уже принято при подключении. Ограничение MOBILE_ALLOWED_USERS,
+        если оно задано, проверяем сами — до отправки события агенту.
+        """
+        return True
+
     # Сколько символов шлём одним кадром message. База читает этот атрибут для нарезки
     # и для стриминга (gateway/platforms/base.py: MAX_MESSAGE_LENGTH, по умолчанию 4096).
     MAX_MESSAGE_LENGTH = proto.DEFAULT_CHUNK_LIMIT
@@ -432,6 +443,15 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self.outbox_limit = int(extra.get("outbox_limit", DEFAULT_OUTBOX_LIMIT) or DEFAULT_OUTBOX_LIMIT)
 
     # ── доступ пользователя ──────────────────────────────────────────────────
+
+    def _user_allowed(self, device: "MobileDevice") -> bool:
+        """Пускаем ли этого пользователя к агенту (ограничение MOBILE_ALLOWED_USERS)."""
+        return self._is_dm_allowed(device.user_id or device.device_id)
+
+    def _require_user_allowed(self, device: "MobileDevice") -> None:
+        """Отказ до агента: сообщение не должно уходить в сессию чужого пользователя."""
+        if not self._user_allowed(device):
+            raise proto.ProtocolError(proto.E_FORBIDDEN, i18n.t("err.user_not_allowed"))
 
     def _is_dm_allowed(self, sender_id: str) -> bool:
         """Кого пускаем к агенту без pairing.
@@ -657,6 +677,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     # ── входящие сообщения ───────────────────────────────────────────────────
 
     async def _on_text(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
+        self._require_user_allowed(device)
         message_id = proto.client_id(frame) or uuid.uuid4().hex
         if self._dedup.is_duplicate(f"{device.chat_id}:{message_id}"):
             logger.info("hermes-mobile: duplicate message %s — skipping", message_id)
@@ -672,6 +693,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         await self.handle_message(event)
 
     async def _on_audio(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
+        self._require_user_allowed(device)
         message_id = proto.client_id(frame) or uuid.uuid4().hex
         if self._dedup.is_duplicate(f"{device.chat_id}:{message_id}"):
             logger.info("hermes-mobile: duplicate voice message %s — skipping", message_id)
@@ -697,6 +719,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         до последнего куска и только потом отдаём агенту, иначе он получит обрывок.
         """
         info = proto.parse_media_upload(frame)
+        self._require_user_allowed(device)
         message_id = info["message_id"]
         key = f"{device.chat_id}:{message_id}"
         if info["parts"] > 1:

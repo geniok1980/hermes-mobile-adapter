@@ -38,6 +38,11 @@ class TestOwnPolicy(unittest.TestCase):
         self.assertEqual(adapter._dm_policy, "allowlist")
         self.assertEqual(adapter._group_policy, "disabled")
 
+    def test_adapter_declares_upstream_authorization(self):
+        """Свежее ядро без этого признака отвечает permission_denied на каждое сообщение."""
+        adapter = _adapter(self.base)
+        self.assertTrue(adapter.authorization_is_upstream)
+
     def test_token_is_enough_without_allowlist(self):
         adapter = _adapter(self.base)
         self.assertTrue(adapter._is_dm_allowed(USER))

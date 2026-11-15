@@ -1,7 +1,7 @@
 name: hermes-mobile
 label: Mobile App (WebSocket)
 kind: platform
-version: 1.4.1
+version: 1.4.2
 requires_hermes: ">=0.21.6"
 description: >
   Platform adapter for mobile applications: it runs a WebSocket server inside
