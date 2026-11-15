@@ -323,11 +323,10 @@ class TestMediaHardening(BaseWS):
 
 class TestProtocolMediaCeiling(unittest.TestCase):
     def test_parts_ceiling_is_2048(self):
-        expected = -(-proto.MAX_MEDIA_BYTES // proto.MIN_MEDIA_CHUNK_BYTES)
-        self.assertEqual(expected, 2048)
+        self.assertEqual(proto.MAX_MEDIA_PARTS, 2048)
 
     def test_parts_above_ceiling_rejected(self):
-        max_parts = -(-proto.MAX_MEDIA_BYTES // proto.MIN_MEDIA_CHUNK_BYTES)
+        max_parts = proto.MAX_MEDIA_PARTS
         frame = {
             "t": proto.C_MEDIA,
             "kind": "image",

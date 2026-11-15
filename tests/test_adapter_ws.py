@@ -293,7 +293,7 @@ class TestInbound(BaseWS):
         self.assertEqual(event.text, "распознанный текст")
         self.assertEqual(event.metadata, {})   # см. тест выше: метаданные ядро отклоняет
         self.assertEqual(len(event.media_urls), 1)
-        saved = os.path.join(self._hermes_home, "mobile-media", "v1.wav")
+        saved = os.path.join(self._hermes_home, "cache", "mobile-media", "v1.wav")
         self.assertTrue(os.path.exists(saved))
         with open(saved, "rb") as handle:
             self.assertEqual(handle.read(), wav)

@@ -427,7 +427,12 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._lock = asyncio.Lock()
         self._dedup = MessageDeduplicator(max_size=4000, ttl_seconds=600)
         self._idle_tasks: Dict[str, asyncio.Task] = {}
-        self._media_dir = Path(_get_hermes_home()).expanduser() / "mobile-media"
+        # Ядро Hermes читает вложения агента только из своих каталогов медиа
+        # (``tools/image_source._media_cache_roots``: ``cache/``, ``images/`` и подобные), а на
+        # мультипрофильном шлюзе ещё и переносит их в ``cache`` активного профиля
+        # (``gateway/run_inbound_media.rehome_inbound_media``). Файл вне этих каталогов агент
+        # получает как путь, которого не видит, — вложение «теряется», остаётся только текст.
+        self._media_dir = Path(_get_hermes_home()).expanduser() / "cache" / "mobile-media"
         # Карточки-вопросы (одобрение команды, clarify, подтверждение слэш-команды):
         # prompt_id → {kind, session_key, chat_id, token, choices, created_at}.
         self._pending_prompts: Dict[str, Dict[str, Any]] = {}
@@ -709,6 +714,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             message_type=MessageType.VOICE,
             media_urls=[str(path)],
             media_types=["audio/wav" if fmt == "wav" else "audio/ogg"],
+            media_filenames=[path.name],
         )
         await self.handle_message(event)
 
@@ -794,6 +800,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             media_urls=[str(path)],
             media_types=[info["mime"]],
             media_text_inlined=[False],   # текст в файле не подставляем в сообщение
+            media_filenames=[info["filename"] or path.name],
         )
         await self.handle_message(event)
 
@@ -852,6 +859,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         media_urls: Optional[List[str]] = None,
         media_types: Optional[List[str]] = None,
         media_text_inlined: Optional[List[Optional[bool]]] = None,
+        media_filenames: Optional[List[str]] = None,
     ) -> MessageEvent:
         user_id = device.user_id or device.device_id
         user_name = device.display_name()
@@ -863,6 +871,11 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             user_name=user_name,
             message_id=message_id,
         )
+        # ``media_filenames`` появился в новых ядрах; на старых его нет — передаём только
+        # если поле существует, иначе конструктор события упадёт и сообщение не дойдёт.
+        extra: Dict[str, Any] = {}
+        if "media_filenames" in getattr(MessageEvent, "__dataclass_fields__", {}):
+            extra["media_filenames"] = list(media_filenames or [])
         return MessageEvent(
             text=text,
             message_type=message_type,

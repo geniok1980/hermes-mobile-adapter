@@ -270,7 +270,7 @@ class TestSdkCapabilities(BaseWS):
             self.assertIn("document", capabilities["media_in"])
             self.assertIn("voice", capabilities["media_out"])
             self.assertIn("exec_approval", capabilities["prompts"])
-            self.assertEqual(capabilities["max_media_bytes"], 8 * 1024 * 1024)
+            self.assertEqual(capabilities["max_media_bytes"], 20 * 1024 * 1024)
 
 
 if __name__ == "__main__":
