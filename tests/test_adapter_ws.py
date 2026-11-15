@@ -237,8 +237,11 @@ class TestInbound(BaseWS):
         self.assertEqual(event.source.chat_id, "mobile:dev-1")
         self.assertEqual(event.source.chat_type, "dm")
         self.assertEqual(event.source.user_id, "u-1")
-        self.assertEqual(event.metadata["mobile"]["device_id"], "dev-1")
-        self.assertEqual(event.metadata["mobile"]["app_version"], "1.0.0")
+        # Метаданные события должны остаться пустыми: ядро Hermes (native admission,
+        # session_envelope._native_metadata) принимает во входящем событии только метаданные
+        # WhatsApp, а любые другие отклоняет с invalid_params — сообщение тогда не сохраняется
+        # и до агента не доходит. Устройство видно из source и журнала адаптера.
+        self.assertEqual(event.metadata, {})
 
     async def test_avatar_goes_thinking_then_idle(self):
         await self.websocket.send(proto.dumps({"t": proto.C_TEXT, "id": "m2", "text": "привет"}))
@@ -288,7 +291,7 @@ class TestInbound(BaseWS):
         event = await self.adapter.next_event()
         self.assertEqual(str(event.message_type), "MessageType.VOICE")
         self.assertEqual(event.text, "распознанный текст")
-        self.assertTrue(event.metadata["mobile"]["voice"])
+        self.assertEqual(event.metadata, {})   # см. тест выше: метаданные ядро отклоняет
         self.assertEqual(len(event.media_urls), 1)
         saved = os.path.join(self._hermes_home, "mobile-media", "v1.wav")
         self.assertTrue(os.path.exists(saved))

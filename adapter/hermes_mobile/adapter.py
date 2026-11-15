@@ -688,7 +688,6 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             media_urls=[str(path)],
             media_types=["audio/wav" if fmt == "wav" else "audio/ogg"],
         )
-        event.metadata["mobile"]["voice"] = True
         await self.handle_message(event)
 
     async def _on_media(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
@@ -773,7 +772,6 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             media_types=[info["mime"]],
             media_text_inlined=[False],   # текст в файле не подставляем в сообщение
         )
-        event.metadata["mobile"].update({"media_kind": kind, "filename": info["filename"]})
         await self.handle_message(event)
 
     async def _on_deliver(self, device: MobileDevice, frame: Dict[str, Any]) -> None:
@@ -852,14 +850,11 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             media_urls=list(media_urls or []),
             media_types=list(media_types or []),
             media_text_inlined=list(media_text_inlined or []),
-            metadata={
-                "mobile": {
-                    "device_id": device.device_id,
-                    "device_name": device.display_name(),
-                    "platform": device.platform,
-                    "app_version": device.app_version,
-                }
-            },
+            # ``metadata`` намеренно не заполняем: ядро Hermes (native admission,
+            # ``session_envelope._native_metadata``) принимает во входящем событии только
+            # метаданные WhatsApp, а любые другие отклоняет целиком с ``invalid_params`` —
+            # и сообщение не сохраняется и не доходит до агента. Сведения об устройстве
+            # уже есть в ``source`` (chat_id, user_id) и в журнале адаптера.
         )
 
     def _store_audio(self, message_id: str, audio: bytes, fmt: str) -> Path:
