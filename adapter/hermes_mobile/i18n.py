@@ -41,6 +41,11 @@ _CATALOG = {
         # Connection card (Telegram / terminal).
         "invite.name_default": "Hermes Agent",
         "invite.no_address": "ws://<agent address>:{port}{path} (the agent's local network address)",
+        "invite.loopback": (
+            "⚠️ The adapter listens on 127.0.0.1 ONLY: a phone cannot reach this port over the network.\n"
+            "Set MOBILE_HOST=0.0.0.0 in the profile .env and restart the gateway — a new card with a working "
+            "address will arrive."
+        ),
         "invite.card": (
             "📱 Agent \"{name}\" is ready for the app\n\n"
             "Address:\n{urls}\n\n"
@@ -103,6 +108,11 @@ _CATALOG = {
         # Карточка подключения (Telegram / терминал).
         "invite.name_default": "Hermes Agent",
         "invite.no_address": "ws://<адрес агента>:{port}{path} (адрес агента в локальной сети)",
+        "invite.loopback": (
+            "⚠️ Платформа слушает ТОЛЬКО 127.0.0.1: с телефона по сети этот порт недоступен.\n"
+            "Поставьте MOBILE_HOST=0.0.0.0 в .env профиля и перезапустите шлюз — придёт новая карточка "
+            "с рабочим адресом."
+        ),
         "invite.card": (
             "📱 Агент «{name}» готов к подключению\n\n"
             "Адрес:\n{urls}\n\n"

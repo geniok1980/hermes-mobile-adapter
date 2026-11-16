@@ -172,7 +172,7 @@ class TestAutoToken(InviteBase):
 
 class TestConnectionCard(InviteBase):
     async def test_card_is_sent_once_with_address_and_token(self):
-        adapter = await self.start()
+        adapter = await self.start(host="0.0.0.0")
         self.assertEqual(len(self.telegram.messages), 1)
         message = self.telegram.messages[0]
         self.assertEqual(str(message["chat_id"]), CHAT)
@@ -183,14 +183,34 @@ class TestConnectionCard(InviteBase):
         marker = json.loads((mobile_adapter._get_hermes_home() and (self.env_path().parent / "mobile-invite.json")).read_text(encoding="utf-8"))
         self.assertTrue(marker["sent"])
 
-        # Повторный старт с тем же токеном — новой карточки нет.
+        # Повторный старт с тем же токеном и тем же адресом — новой карточки нет.
         await adapter.disconnect()
-        again = await self.start(token=adapter.token)
+        again = await self.start(host="0.0.0.0", token=adapter.token)
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertFalse(again.token_generated)
 
-    async def test_rotated_token_sends_new_card(self):
+    async def test_loopback_card_warns_instead_of_fake_address(self):
+        """Порт на 127.0.0.1: карточка обязана предупредить, а не дать нерабочий адрес."""
+        adapter = await self.start()
+        self.assertEqual(len(self.telegram.messages), 1)
+        text = self.telegram.messages[0]["text"]
+        self.assertNotIn("ws://", text)
+        self.assertIn("127.0.0.1", text)
+        self.assertIn("MOBILE_HOST=0.0.0.0", text)
+        self.assertIn(adapter.token, text)
+
+    async def test_new_bind_address_sends_fresh_card(self):
+        """Включили MOBILE_HOST=0.0.0.0 — прежняя карточка вела на закрытый порт, нужна новая."""
         first = await self.start()
+        self.assertEqual(len(self.telegram.messages), 1)
+        self.assertIn("127.0.0.1", self.telegram.messages[0]["text"])
+        await first.disconnect()
+        await self.start(host="0.0.0.0", token=first.token)
+        self.assertEqual(len(self.telegram.messages), 2)
+        self.assertIn("ws://", self.telegram.messages[1]["text"])
+
+    async def test_rotated_token_sends_new_card(self):
+        first = await self.start(host="0.0.0.0")
         self.assertEqual(len(self.telegram.messages), 1)
         await first.disconnect()
         rotated = "f" * 64

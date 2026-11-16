@@ -222,9 +222,19 @@ def send_telegram_card(api: str, bot: str, chat: str, text: str, timeout: float 
         return False, exc.__class__.__name__
 
 
-def invite_text(name: str, token: str, address: str, port: int, path: str) -> str:
-    """Текст карточки подключения (локаль из i18n)."""
-    urls = "\n".join(f"ws://{host}:{port}{path}" for host in [address] if host)
+def invite_text(
+    name: str, token: str, address: str, port: int, path: str, loopback: bool = False
+) -> str:
+    """Текст карточки подключения (локаль из i18n).
+
+    ``loopback`` — платформа слушает только 127.0.0.1: адрес в локальной сети тогда
+    недоступен, и карточка обязана это сказать, а не выдавать нерабочую ссылку.
+    """
+    urls = (
+        i18n.t("invite.loopback")
+        if loopback
+        else "\n".join(f"ws://{host}:{port}{path}" for host in [address] if host)
+    )
     return i18n.t(
         "invite.card",
         name=name or i18n.t("invite.name_default"),
@@ -517,6 +527,15 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             )
         except OSError as exc:
             return self._fail("bind_failed", f"failed to bind {self.host}:{self.port} — {exc}", retryable=True)
+        if _is_loopback(self.host):
+            # Порт открыт только на этой машине: локальные проверки («слушает!») проходят,
+            # а телефон в сети до него не доходит. Пишем прямо, иначе ищут причину в сети.
+            logger.warning(
+                "hermes-mobile: listening on %s:%s — the phone will not reach this port over the network; "
+                "set MOBILE_HOST=0.0.0.0 in the profile .env to allow LAN connections",
+                self.host,
+                self.port,
+            )
         self.listener_base = f"ws://{self.host}:{self.port}{self.path}"
         self._mark_connected(listener_base=self.listener_base)
         logger.info(
@@ -1445,15 +1464,20 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     def _invite_marker_path(self) -> Path:
         return Path(_get_hermes_home()).expanduser() / INVITE_FILE
 
-    def _read_invite_marker(self) -> str:
+    def _read_invite_marker(self) -> Dict[str, str]:
         with contextlib.suppress(Exception):
             data = json.loads(self._invite_marker_path().read_text(encoding="utf-8"))
-            return str(data.get("token_fingerprint") or "")
-        return ""
+            if isinstance(data, dict):
+                return {
+                    "token_fingerprint": str(data.get("token_fingerprint") or ""),
+                    "host": str(data.get("host") or ""),
+                }
+        return {}
 
     def _write_invite_marker(self, fingerprint: str, sent: bool) -> None:
         payload = {
             "token_fingerprint": fingerprint,
+            "host": self.host,
             "sent": bool(sent),
             "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
@@ -1477,7 +1501,13 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             self._write_invite_marker(fingerprint, sent=False)
             logger.info("hermes-mobile: invite armed for token rotation (fingerprint %s)", fingerprint)
             return "none"
-        return "rotated" if previous != fingerprint else "none"
+        if previous.get("token_fingerprint") != fingerprint:
+            return "rotated"
+        # Адрес прослушивания изменился (например, включили MOBILE_HOST=0.0.0.0):
+        # прежняя карточка вела на закрытый порт, нужна новая.
+        if previous.get("host") != self.host:
+            return "rebind"
+        return "none"
 
     def _invite_message(self) -> str:
         addresses = lan_addresses()
@@ -1488,6 +1518,7 @@ class HermesMobileAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             address=address,
             port=self.port,
             path=self.path,
+            loopback=_is_loopback(self.host),
         )
 
     async def _announce_invite(self) -> None:
