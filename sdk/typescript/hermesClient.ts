@@ -174,6 +174,13 @@ export interface MediaSendOptions {
 
 const CLOSE_POLICY_VIOLATION = 1008;
 
+/** Проверка живости связи: пинг и срок ожидания ответа. */
+const HEARTBEAT_MS = 15_000;
+const PONG_TIMEOUT_MS = 6_000;
+const RESUME_PONG_TIMEOUT_MS = 4_000;
+/** Ответ на пинг старше этого срока — связь считаем потерянной, не тратя время на пробу. */
+const STALE_PONG_MS = 25_000;
+
 /** События WebSocket, которые реально нужны приложению (не тянем типы из окружения). */
 interface SocketMessageEvent {
   data: unknown;
@@ -194,6 +201,12 @@ export class HermesClient {
   private state: ConnectionState = 'idle';
   /** Сборка многочастных медиа от агента: id → части. */
   private mediaBuffers = new Map<string, { parts: number; chunks: Uint8Array[]; meta: MediaPayload }>();
+  /** Проверка живости связи: пинг по таймеру и срок ожидания ответа. */
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastPongAt = 0;
+  /** Приложение в фоне: переподключения не крутим вхолостую — ждём возврата. */
+  private paused = false;
 
   constructor(options: ClientOptions) {
     this.options = options;
@@ -216,9 +229,45 @@ export class HermesClient {
   disconnect(): void {
     this.closedByUser = true;
     this.clearReconnect();
+    this.stopHeartbeat();
     this.socket?.close();
     this.socket = null;
     this.setState('idle');
+  }
+
+  /**
+   * Приложение вернулось на экран. После сворачивания сокет часто остаётся
+   * «наполовину открытым»: система его не закрыла, но кадры не доходят. Поэтому
+   * проверяем связь сразу (пинг с коротким сроком), а не ждём очередного backoff.
+   */
+  resume(): void {
+    if (this.closedByUser) return;
+    this.paused = false;
+    this.attempt = 0;
+    this.clearReconnect();
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1) {
+      this.reconnectNow();
+      return;
+    }
+    // Долгий фон: ответа на пинг давно нет — сокет заведомо мёртв, пробовать незачем.
+    if (this.lastPongAt === 0 || Date.now() - this.lastPongAt > STALE_PONG_MS) {
+      this.reconnectNow();
+      return;
+    }
+    this.startHeartbeat();
+    this.probe(RESUME_PONG_TIMEOUT_MS);
+  }
+
+  /** Приложение ушло в фон: таймеры замораживаются системой, пинги прекращаем сами. */
+  pause(): void {
+    this.paused = true;
+    this.stopHeartbeat();
+  }
+
+  /** Время последнего ответа шлюза на пинг (0 — ещё не было). */
+  get lastPongAtMs(): number {
+    return this.lastPongAt;
   }
 
   /** Текстовое сообщение агенту. `id` обеспечивает идемпотентность на стороне Hermes. */
@@ -362,8 +411,16 @@ export class HermesClient {
     };
 
     socket.onclose = (event: SocketCloseEvent) => {
+      // Закрылся прежний сокет, а новый уже открыт (переподключение по пингу) — не мешаем.
+      if (this.socket !== socket) return;
       this.socket = null;
+      this.stopHeartbeat();
       if (this.closedByUser) {
+        return;
+      }
+      if (this.paused) {
+        // Система закрыла сокет, пока приложение свёрнуто: соединение поднимем на возврате.
+        this.setState('reconnecting', 'приложение в фоне');
         return;
       }
       if (event.code === CLOSE_POLICY_VIOLATION) {
@@ -392,6 +449,7 @@ export class HermesClient {
       case 'ready':
         this.attempt = 0;
         this.setState('connected');
+        this.startHeartbeat();
         this.handlers.onReady?.(frame as unknown as ReadyPayload);
         return;
       case 'typing':
@@ -457,6 +515,9 @@ export class HermesClient {
         });
         return;
       case 'pong':
+        this.lastPongAt = Date.now();
+        this.clearPong();
+        return;
       default:
         return; // неизвестные кадры игнорируем — так требует протокол
     }
@@ -524,6 +585,71 @@ export class HermesClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+
+  // ── живость связи ──────────────────────────────────────────────────────────
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => this.probe(PONG_TIMEOUT_MS), HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.clearPong();
+  }
+
+  private clearPong(): void {
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+  }
+
+  /**
+   * Пинг и ожидание ответа. Молчание означает «сокет открыт, а канал мёртв»
+   * (обычное состояние после сворачивания приложения): соединение
+   * пересоздаём, не дожидаясь закрытия от системы.
+   */
+  private probe(timeoutMs: number): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1 || this.pongTimer) return;
+    try {
+      socket.send(JSON.stringify({ t: 'ping', ts: Date.now() }));
+    } catch {
+      this.reconnectNow();
+      return;
+    }
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      this.handlers.onError?.({
+        code: 'transport',
+        message: 'Связь с шлюзом потеряна, переподключаюсь',
+        fatal: false,
+      });
+      this.reconnectNow();
+    }, timeoutMs);
+  }
+
+  /** Пересоздаёт соединение немедленно, без накопленной паузы backoff. */
+  private reconnectNow(): void {
+    this.stopHeartbeat();
+    this.clearReconnect();
+    this.attempt = 0;
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      try {
+        socket.close();
+      } catch {
+        // уже закрыт
+      }
+    }
+    if (this.closedByUser) return;
+    this.open();
   }
 
   private setState(state: ConnectionState, detail?: string): void {
